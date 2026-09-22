@@ -29,9 +29,13 @@ export interface BattleRoomOptions {
   cfg: Pick<AppConfig, 'jevMock' | 'sendRqid'>;
 }
 
+/** 同一 request 被拒后最多自动补发几次修正指令 */
+const MAX_CHOICE_RETRIES = 1;
+
 /**
  * 单个战斗房间：消费协议行、处理 |request|、调用决策层并把 /choose 发回服务器。
  * - 同一 rqid 只答一次；更新的 request 会作废旧决策（generation 机制）
+ * - |error|[Invalid choice] 后用本地启发式重发修正指令（服务器不会重发 request）；重试用尽后发 default
  * - |error|[Invalid choice] 连续 3 次后本场固定用本地启发式
  * - |win| / |tie| / |deinit| 触发结束汇总
  */
@@ -41,6 +45,9 @@ export class BattleRoom {
   private lastRqidAnswered: number | null = null;
   private illegalErrors = 0;
   private heuristicMode = false;
+  /** 最近一次已发送指令的 request；用于被拒后重发修正指令 */
+  private pendingRequest: BattleRequest | null = null;
+  private pendingRetries = 0;
   private summary: BattleSummary;
   private resolveFinished!: (summary: BattleSummary) => void;
   private finishedPromise: Promise<BattleSummary>;
@@ -138,6 +145,8 @@ export class BattleRoom {
       if (generation !== this.generation) return; // 已被更新的 request 取代，丢弃
       if (!outcome) return;
       this.lastRqidAnswered = request.rqid ?? null;
+      this.pendingRequest = request;
+      this.pendingRetries = 0;
       this.summary.decisions++;
       if (outcome.fallback) this.summary.fallbacks++;
       this.summary.costUsd += outcome.usage?.cost ?? 0;
@@ -164,6 +173,47 @@ export class BattleRoom {
           `[${this.opts.battleId}] 连续 ${this.illegalErrors} 次非法指令，本场后续固定使用本地启发式`,
         );
       }
+      // "too late" 说明回合已推进（新 request 随后会到），重发没有意义
+      if (!text.includes('too late')) void this.retryAfterInvalidChoice();
+    }
+  }
+
+  /**
+   * 服务器对被拒的 /choose 不会重发 request（sim/side.ts emitChoiceError 只发 |error|），
+   * 必须自己补发修正指令，否则会白等到计时器超时被服务器代选。
+   */
+  private async retryAfterInvalidChoice(): Promise<void> {
+    const request = this.pendingRequest;
+    if (!request || this.summary.finished) return;
+    if (this.pendingRetries >= MAX_CHOICE_RETRIES) {
+      this.opts.logger.error(`[${this.opts.battleId}] 非法指令重试次数用尽，发送 default`);
+      this.sendDefault();
+      return;
+    }
+    this.pendingRetries++;
+    const generation = this.generation;
+    try {
+      const outcome = await decideChoice({
+        dex: this.opts.dex,
+        request,
+        tracker: this.tracker,
+        jev: null, // 原指令已被服务器判非法，直接改用本地启发式，不再调用模型
+        logger: this.opts.logger,
+        battleId: this.opts.battleId,
+        cfg: this.opts.cfg,
+      });
+      if (!outcome || generation !== this.generation || this.summary.finished) return;
+      this.summary.decisions++;
+      this.summary.fallbacks++;
+      this.connSend(outcome.command);
+      this.opts.logger.warn(
+        `[${this.opts.battleId}] 修正指令（第 ${this.pendingRetries} 次重试）: ${outcome.command}`,
+      );
+    } catch (err) {
+      this.opts.logger.error(
+        `[${this.opts.battleId}] 重试决策异常，发送 default: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      if (generation === this.generation) this.sendDefault();
     }
   }
 
