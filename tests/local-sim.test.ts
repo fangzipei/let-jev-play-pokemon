@@ -190,7 +190,8 @@ async function runLocalBattle(input: {
 
   // sim 的 setPlayer 对 team 字符串走 Teams.unpack（sim/battle.ts getTeam），
   // 因此必须传 packed 格式，与真实服务器上传的队伍格式一致
-  void stream.write(`>start {"formatid":"${input.formatId}"}`);
+  // 固定 seed：使 p2 的 default 选招/伤害随机数可复现，避免探针用例如随机波动而 flaky
+  void stream.write(`>start {"formatid":"${input.formatId}","seed":[1,2,3,4]}`);
   void stream.write(`>player p1 ${JSON.stringify({name: 'Player1', team: packTeam(input.p1Team).packed})}`);
   void stream.write(`>player p2 ${JSON.stringify({name: 'Player2', team: packTeam(input.p2Team).packed})}`);
 
@@ -288,19 +289,22 @@ describe('local sim 集成', () => {
       p1Choice: (request, tracker) => {
         if (!request.teamPreview && !firstTurnDone && (request.active?.length ?? 0) === 2) {
           firstTurnDone = true;
-          // 槽位 1：Iron Head 指 +1（p2a）；槽位 2：Helping Hand（替换后第 1 招）指 -1（p1a，即队友）
-          return 'move 1 +1, move 1 -1';
+          // 槽位 1：Sucker Punch（第 4 招，先制 +1）指 +1（p2a）——先制保证 p1a 在对手之前出手，
+          // 避免慢速的 Golisopod 被 Metagross 的 Iron Head（30% 畏缩）先手打断（seed 固定后曾稳定复现）；
+          // 槽位 2：Helping Hand（替换后第 1 招，先制 +5）指 -1（p1a，即队友）
+          return 'move 4 +1, move 1 -1';
         }
         return fallbackChoice(probeDex)(request, tracker);
       },
       timeoutMs: 15000,
     });
     expect(result.errors).toEqual([]);
-    const ironHeadLine = result.log.find(line => line.startsWith('|move|p1a:') && line.includes('|Iron Head|'));
-    expect(ironHeadLine).toBeDefined();
-    expect(ironHeadLine).toContain('|p2a:');
+    const diagnostic = `p1a 相关日志: ${result.log.filter(line => line.includes('p1a')).join(' | ') || '(无)'}`;
+    const suckerPunchLine = result.log.find(line => line.startsWith('|move|p1a:') && line.includes('|Sucker Punch|'));
+    expect(suckerPunchLine, diagnostic).toBeDefined();
+    expect(suckerPunchLine).toContain('|p2a:');
     const helpingHandLine = result.log.find(line => line.startsWith('|move|p1b:') && line.includes('|Helping Hand|'));
-    expect(helpingHandLine).toBeDefined();
+    expect(helpingHandLine, diagnostic).toBeDefined();
     expect(helpingHandLine).toContain('|p1a:');
   }, 30000);
 });
