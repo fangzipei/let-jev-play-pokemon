@@ -61,4 +61,11 @@ describe('validateActions', () => {
   it('team order 必须 6 位不重复', () => {
     expect(validateActions([{kind: 'team', order: [1, 1, 2, 3, 4, 5]}]).join()).toMatch(/team order/);
   });
+  it('两个槽位不能换入同一只替补', () => {
+    const problems = validateActions([
+      {kind: 'switch', slot: 1, teamIndex: 4},
+      {kind: 'switch', slot: 2, teamIndex: 4},
+    ], request);
+    expect(problems.join()).toMatch(/重复/);
+  });
 });

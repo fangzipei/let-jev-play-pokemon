@@ -230,4 +230,21 @@ describe('decideChoice - force switch', () => {
     expect(outcome?.fallback).toBe(true);
     expect(outcome?.command).toBe('/choose switch 4, pass|7');
   });
+
+  it('双槽位选中同一替补时自动去重（服务器拒绝 can only switch in once）', async () => {
+    const request = mkRequest();
+    request.active = undefined;
+    request.forceSwitch = [true, true];
+    const ctx = mkCtx({
+      request,
+      jev: mkJev({
+        switch_slot_1: {type: 'choice', choice: 'switch_3', confidence: 0.7},
+        switch_slot_2: {type: 'choice', choice: 'switch_3', probabilities: {switch_3: 0.5, switch_4: 0.4}},
+      }),
+    });
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose switch 3, switch 4|7');
+    expect(outcome?.adjusted).toContain('adjusted:switch_slot_2: switch_4');
+    expect(outcome?.fallback).toBe(false);
+  });
 });

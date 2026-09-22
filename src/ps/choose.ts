@@ -45,6 +45,7 @@ export function buildChooseCommand(actions: ChooseAction[], opts: ChooseOptions 
 export function validateActions(actions: ChooseAction[], request?: BattleRequest): string[] {
   const problems: string[] = [];
   const slots = new Set<number>();
+  const switchTargets = new Set<number>();
   let megaCount = 0;
   for (const a of actions) {
     if (a.kind === 'default') continue;
@@ -69,6 +70,9 @@ export function validateActions(actions: ChooseAction[], request?: BattleRequest
       }
     }
     if (a.kind === 'switch') {
+      // 同一只替补不能被两个槽位重复选中（服务器 side.ts 报 "can only switch in once"）
+      if (switchTargets.has(a.teamIndex)) problems.push(`换人目标重复: ${a.teamIndex}`);
+      switchTargets.add(a.teamIndex);
       if (a.teamIndex < 1 || a.teamIndex > 6) problems.push(`非法换人槽位: ${a.teamIndex}`);
       if (request) {
         const target = request.side.pokemon[a.teamIndex - 1];

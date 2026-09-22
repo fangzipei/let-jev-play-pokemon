@@ -9,7 +9,7 @@ import {resolveKey} from './answers.js';
 import {fallbackActions, type FallbackContext} from './fallback.js';
 import {buildSwitchPlans} from './force-switch.js';
 import {buildPreviewQuestions, fullTeamOrder, resolvePreviewOrder} from './team-preview.js';
-import {buildTurnPlans, type SlotAction} from './turn.js';
+import {buildTurnPlans, type SlotAction, type SlotQuestionPlan} from './turn.js';
 
 export type DecisionKind = 'team-preview' | 'turn' | 'force-switch' | 'none';
 
@@ -104,6 +104,46 @@ function degradeMegaConflicts(actions: ChooseAction[], picks: SlotPick[], adjust
   });
 }
 
+/**
+ * 同一只替补不能被两个槽位同时换入（服务器 sim/side.ts 会拒绝 "can only switch in once"）。
+ * 合并结果中出现重复时，后出现的槽位改用该槽位问题 probabilities（缺失时按选项顺序）中最高的未用替补；
+ * 无候选时保留原动作，交给 validateActions 判定后整体兜底。
+ */
+function dedupeSwitchTargets(
+  actions: ChooseAction[],
+  plans: SlotQuestionPlan[],
+  answers: Record<string, Answer>,
+  adjusted: string[],
+): ChooseAction[] {
+  const used = new Set<number>();
+  const out: ChooseAction[] = [];
+  for (const action of actions) {
+    if (action.kind !== 'switch') {
+      out.push(action);
+      continue;
+    }
+    if (!used.has(action.teamIndex)) {
+      used.add(action.teamIndex);
+      out.push(action);
+      continue;
+    }
+    const plan = plans.find(p => p.slot === action.slot);
+    const answer = plan ? answers[plan.questionName] : undefined;
+    const probabilities = answer && answer.type === 'choice' ? answer.probabilities ?? {} : {};
+    const alternative = (plan?.options ?? [])
+      .filter(o => o.action.kind === 'switch' && !used.has(o.action.teamIndex))
+      .sort((a, b) => (probabilities[b.key] ?? -1) - (probabilities[a.key] ?? -1))[0];
+    if (plan && alternative && alternative.action.kind === 'switch') {
+      used.add(alternative.action.teamIndex);
+      adjusted.push(`adjusted:${plan.questionName}: ${alternative.key}`);
+      out.push(alternative.action);
+    } else {
+      out.push(action);
+    }
+  }
+  return out;
+}
+
 function localRun(ctx: FallbackContext, note: string): DecisionRun {
   return {
     actions: fallbackActions(ctx),
@@ -162,7 +202,8 @@ async function runWithJev(
     picks.push({slot: plan.slot, action: option.action, key: resolved.key, confidence: resolved.confidence});
   }
   const merged = mergeBySlot(fallbackActions(ctx), picks);
-  const actions = degradeMegaConflicts(merged.actions, picks, adjusted);
+  const deduped = dedupeSwitchTargets(merged.actions, plans, res.answers, adjusted);
+  const actions = degradeMegaConflicts(deduped, picks, adjusted);
   return {
     actions,
     adjusted,

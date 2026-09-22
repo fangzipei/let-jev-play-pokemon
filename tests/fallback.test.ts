@@ -62,6 +62,17 @@ describe('fallbackSwitchActions', () => {
       {kind: 'pass', slot: 2},
     ]);
   });
+
+  it('双槽位同时换人时选择两只不同替补', () => {
+    const request = mkRequest();
+    request.active = undefined;
+    request.forceSwitch = [true, true];
+    const actions = fallbackSwitchActions({dex, request, tracker: mkTracker()});
+    expect(actions).toEqual([
+      {kind: 'switch', slot: 1, teamIndex: 4},
+      {kind: 'switch', slot: 2, teamIndex: 3},
+    ]);
+  });
 });
 
 describe('fallbackActions', () => {
