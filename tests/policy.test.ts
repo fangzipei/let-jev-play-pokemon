@@ -124,6 +124,14 @@ describe('decideChoice - turn', () => {
     expect(outcome?.command).toBe('/choose move 1 +1, move 2|7');
   });
 
+  it('fainted 槽位不生成动作，让服务器 auto-pass（避免动作错位）', async () => {
+    const request = mkRequest();
+    request.side.pokemon[0].condition = '0 fnt';
+    const ctx = mkCtx({request, jevMock: true});
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose move 2|7');
+  });
+
   it('request.wait 时返回 null', async () => {
     const ctx = mkCtx({request: mkRequest({wait: true})});
     expect(await decideChoice(ctx)).toBeNull();

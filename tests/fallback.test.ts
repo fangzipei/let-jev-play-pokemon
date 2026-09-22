@@ -41,6 +41,13 @@ describe('fallbackTurnActions', () => {
       {kind: 'slot-default', slot: 2},
     ]);
   });
+
+  it('fainted 槽位不产生动作（服务器 auto-pass，动作会错位到下一个参战位）', () => {
+    const request = mkRequest();
+    request.side.pokemon[0].condition = '0 fnt';
+    const actions = fallbackTurnActions({dex, request, tracker: mkTracker()});
+    expect(actions).toEqual([{kind: 'move', slot: 2, moveIndex: 2}]);
+  });
 });
 
 describe('fallbackSwitchActions', () => {

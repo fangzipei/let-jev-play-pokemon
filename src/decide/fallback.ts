@@ -3,7 +3,7 @@ import type {ChooseAction} from '../ps/choose.js';
 import {effectiveness, estimateDamagePercent} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
-  activeEntries, benchEntries, conditionPercent, speciesOf, teamSlotOf,
+  activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
   type BattleRequest, type RequestPokemon,
 } from '../state/request.js';
 import {opponentActives} from '../state/serialize.js';
@@ -72,13 +72,18 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
       actions.push({kind: 'slot-default', slot});
       continue;
     }
+    // 服务器 getChoiceIndex 会自动 pass fainted 槽位（sim/side.ts）；若这里仍发动作，会被错位应用到下一个参战位
+    if (isFainted(me.condition)) continue;
     const types = speciesTypes(dex, speciesOf(me));
     let best: {index: number; target?: string; score: number} | null = null;
     for (let j = 0; j < reqActive.moves.length; j++) {
       const mv = reqActive.moves[j];
       if (mv.disabled || mv.pp <= 0) continue;
       const move = dex.moves[toId(mv.id)];
-      const spread = mv.target === 'allAdjacentFoe' || mv.target === 'allAdjacent';
+      const spread = mv.target === 'allAdjacentFoes' || mv.target === 'allAdjacent';
+      // CHOOSABLE_TARGETS（sim/battle-actions.ts）：这些 target 在双打必须写出目标位，否则服务器报 needs a target
+      const needsFoeTarget = mv.target === 'normal' || mv.target === 'adjacentFoe' || mv.target === 'any';
+      const needsAllyTarget = mv.target === 'adjacentAlly' || mv.target === 'adjacentAllyOrSelf';
       let score = 0;
       let target: string | undefined;
       if (!move || !move.basePower) {
@@ -91,7 +96,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
           }) ?? 0;
           score = Math.max(score, pct);
         }
-      } else if (mv.target === 'normal' && foes.length > 0) {
+      } else if (needsFoeTarget && foes.length > 0) {
         for (let fi = 0; fi < foes.length; fi++) {
           const pct = estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats, defenderSpecies: foes[fi].species, weather,
@@ -101,6 +106,8 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
             target = `+${fi + 1}`;
           }
         }
+      } else if (needsAllyTarget) {
+        score = 0; // 同伴目标招式（Helping Hand 等）不用于对敌输出
       } else {
         const foe = foes[0];
         score = foe
@@ -109,6 +116,9 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
           }) ?? 0
           : 0;
       }
+      if (needsFoeTarget) target = target ?? (foes.length > 0 ? '+1' : undefined);
+      else if (needsAllyTarget) target = slot === 1 ? '-2' : '-1';
+      else target = undefined; // 其余 target 一律不写（写了会被服务器拒绝）
       if (!best || score > best.score) best = {index: j + 1, target, score};
     }
     if (!best) {

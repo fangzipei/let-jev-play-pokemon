@@ -2,7 +2,7 @@ import {speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
 import {toId} from '../state/protocol.js';
 import {
-  activeEntries, benchEntries, speciesOf, teamSlotOf,
+  activeEntries, benchEntries, isFainted, speciesOf, teamSlotOf,
   type BattleRequest,
 } from '../state/request.js';
 import {describeMoveOption, describeSwitchOption, opponentActives, type OpponentActive} from '../state/serialize.js';
@@ -83,7 +83,7 @@ function targetSpecsFor(target: string, slot: 1 | 2, foeCount: number): TargetSp
     // 槽位 1 的同伴在参战位 2 → '-2'；槽位 2 的同伴在参战位 1 → '-1'
     return [{suffix: '_ally', target: slot === 1 ? '-2' : '-1'}];
   }
-  // self / all / allAdjacent / allAdjacentFoe / allySide / foeSide … 都不需要写目标
+  // self / all / allAdjacent / allAdjacentFoes / allySide / foeSide … 都不需要写目标
   return [{suffix: ''}];
 }
 
@@ -93,6 +93,8 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
   const reqActive = request.active?.[activeIndex];
   const me = activeEntries(request)[activeIndex];
   if (!reqActive || !me) return [];
+  // fainted 槽位由服务器自动 pass（sim/side.ts getChoiceIndex）；提问会生成错位动作
+  if (isFainted(me.condition)) return [];
   const species = speciesOf(me);
   const types = speciesTypes(dex, species);
   const weather = tracker.state.weather;
@@ -103,7 +105,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     if (mv.disabled || mv.pp <= 0) continue;
     const moveInfo = dex.moves[toId(mv.id)];
     const damaging = (moveInfo?.basePower ?? 0) > 0;
-    const hitsBoth = mv.target === 'allAdjacentFoe' || mv.target === 'allAdjacent';
+    const hitsBoth = mv.target === 'allAdjacentFoes' || mv.target === 'allAdjacent';
     const canMega = reqActive.canMegaEvo === true && damaging;
     for (const spec of targetSpecsFor(mv.target, slot, foes.length)) {
       const key = `move_${j + 1}${spec.suffix}`;
