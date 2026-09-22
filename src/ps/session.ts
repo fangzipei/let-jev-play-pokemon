@@ -185,7 +185,8 @@ export class PsSession {
     for (const resolve of this.loginResolvers.splice(0)) resolve();
   }
 
-  private startSearch(): void {
+  /** 开始匹配；多场模式在每场结束后重新调用 */
+  startSearch(): void {
     const {cfg, conn, logger} = this.opts;
     switch (cfg.startMode) {
       case 'ladder':
