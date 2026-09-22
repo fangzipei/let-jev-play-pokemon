@@ -35,13 +35,27 @@ export interface JevClient {
 /** SDK 未安装/缺少 alpha.decisions.create 时抛出；客户端会改用 fetch 传输（对应 spec 不确定项 3） */
 export class SdkUnavailableError extends Error {}
 
+/** SDK 返回 camelCase（inputTokens），REST 返回 snake_case（input_tokens）；统一为 DecisionsUsage 的 snake_case */
+function normalizeUsage(raw: unknown): DecisionsUsage {
+  const u = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === 'number' ? v : undefined);
+  const usage: DecisionsUsage = {};
+  const cost = num(u.cost);
+  if (cost != null) usage.cost = cost;
+  const input = num(u.input_tokens) ?? num(u.inputTokens);
+  if (input != null) usage.input_tokens = input;
+  const output = num(u.output_tokens) ?? num(u.outputTokens);
+  if (output != null) usage.output_tokens = output;
+  return usage;
+}
+
 function parseResponse(raw: unknown): {answers: Record<string, Answer>; usage: DecisionsUsage} {
   const obj = (raw ?? {}) as Record<string, unknown>;
   const answers = obj.answers as Record<string, Answer> | undefined;
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     throw new Error(`decisions 响应缺少 answers: ${JSON.stringify(raw).slice(0, 200)}`);
   }
-  return {answers, usage: (obj.usage as DecisionsUsage | undefined) ?? {}};
+  return {answers, usage: normalizeUsage(obj.usage)};
 }
 
 export function createJevClient(opts: JevClientOptions): JevClient {

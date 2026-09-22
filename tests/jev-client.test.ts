@@ -90,4 +90,24 @@ describe('createJevClient / fetch 传输', () => {
     expect(res.answers).toEqual(ANSWERS);
     expect(calls.length).toBe(1);
   });
+
+  it('SDK 返回的 camelCase usage 归一化为 snake_case', async () => {
+    const client = createJevClient({
+      apiKey: 'k', model: 'm', transport: 'sdk',
+      loadSdk: async () => ({
+        OpenRouter: class {
+          alpha = {
+            decisions: {
+              create: async () => ({
+                answers: ANSWERS,
+                usage: {cost: 0.002, inputTokens: 3370, outputTokens: 291},
+              }),
+            },
+          };
+        },
+      }),
+    });
+    const res = await client.decide({state: {}, questions});
+    expect(res.usage).toEqual({cost: 0.002, input_tokens: 3370, output_tokens: 291});
+  });
 });
