@@ -1,0 +1,60 @@
+Golisopod-Mega @ Golisopite
+Ability: Emergency Exit
+EVs: 32 HP / 32 Atk / 2 SpD
+Brave Nature
+Level: 50
+Shiny: Yes
+- Iron Head
+- Drill Run
+- Leech Life
+- Sucker Punch
+
+Tyranitar @ Choice Scarf
+Ability: Sand Stream
+EVs: 2 HP / 32 Atk / 32 Spe
+Adamant Nature
+Level: 50
+- Rock Slide
+- Knock Off
+- Ice Punch
+- Fire Punch
+
+Chandelure @ Life Orb
+Ability: Flash Fire
+EVs: 32 HP / 2 Def / 32 SpA
+Modest Nature
+Level: 50
+- Shadow Ball
+- Heat Wave
+- Trick Room
+- Protect
+
+Excadrill @ Focus Sash
+Ability: Sand Rush
+EVs: 2 HP / 32 Atk / 32 Spe
+Adamant Nature
+Level: 50
+- Iron Head
+- High Horsepower
+- Protect
+- Rock Slide
+
+Salamence-Mega @ Salamencite
+Ability: Intimidate
+EVs: 2 HP / 32 SpA / 32 Spe
+Timid Nature
+Level: 50
+- Protect
+- Hyper Voice
+- Draco Meteor
+- Flamethrower
+
+Rotom-Wash @ Magnet
+Ability: Levitate
+EVs: 32 HP / 32 SpA / 2 Spe
+Modest Nature
+Level: 50
+- Electroweb
+- Thunderbolt
+- Volt Switch
+- Hydro Pump
