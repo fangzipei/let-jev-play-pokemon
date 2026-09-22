@@ -22,7 +22,7 @@ export function stripMegaSuffix(paste: string): string {
 export function packTeam(paste: string): PackedTeam {
   const sets = Teams.import(paste) as Array<{species: string}>;
   if (!sets || !sets.length) throw new Error('team paste 解析为空');
-  const packed = Teams.pack(sets);
+  const packed = Teams.pack(sets as unknown as Parameters<typeof Teams.pack>[0]);
   // 本地包 Dex 不认识 Champions 专属形态时 import 会把物种改写为 id 形式，
   // 无法从 sets 里可靠检测 -Mega，改从原始 paste 文本检测
   return {packed, hasMegaFormSpecies: /-Mega(-[XY])?\s*@/m.test(paste)};
