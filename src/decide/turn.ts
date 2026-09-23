@@ -1,4 +1,4 @@
-import {speciesTypes, type DexData} from '../dex/index.js';
+import {megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
 import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
 import {toId} from '../state/protocol.js';
@@ -7,6 +7,7 @@ import {
   type BattleRequest,
 } from '../state/request.js';
 import {describeMoveOption, describeSwitchOption, opponentActives, type OpponentActive} from '../state/serialize.js';
+import {speedControlOf, speedControlText} from '../state/speed-control.js';
 import type {BattleTracker} from '../state/tracker.js';
 
 export interface SlotMoveAction {
@@ -57,6 +58,15 @@ export function megaNameOf(dex: DexData, species: string, item?: string): string
   return 'unknown Mega form';
 }
 
+/** mega 选项描述：形态名 + 变更后的特性与速度（缺数据时退化为形态名） */
+function megaSummaryOf(dex: DexData, species: string, item?: string): string {
+  const form = megaFormsOf(dex, species).find(f => !!f.requiredItem && (item === undefined || toId(f.requiredItem) === toId(item)));
+  if (!form) return megaNameOf(dex, species, item);
+  const ability = Object.values(form.abilities ?? {})[0];
+  const details = [ability ? `ability ${ability}` : '', form.baseStats.spe !== undefined ? `Speed ${form.baseStats.spe}` : ''].filter(Boolean);
+  return details.length ? `${form.name} (${details.join(', ')})` : form.name;
+}
+
 interface TurnInput {
   dex: DexData;
   request: BattleRequest;
@@ -102,7 +112,10 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
   const types = speciesTypes(dex, species);
   const weather = tracker.state.weather;
   const ourSideState = tracker.state.sides[tracker.state.ourSideId ?? request.side.id];
+  const speedControl = speedControlOf(tracker.state, tracker.state.ourSideId ?? request.side.id);
   const trackedSelf = findOurPokemon(ourSideState, me);
+  // 对手已用掉本场唯一 Mega 后，目标“Mega 后免疫”的警示不再适用
+  const opponentMegaUsed = tracker.state.sides[tracker.state.ourSideId === 'p1' ? 'p2' : 'p1']?.megaUsed === true;
   // 上场后首个行动回合：Fake Out 唯一可用窗口，讲究道具的首个选择即锁招
   const firstActionSinceSwitchIn = trackedSelf?.switchInTurn === undefined
     ? undefined
@@ -134,9 +147,11 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         hitsBoth,
         weather,
         fieldConditions: tracker.state.fieldConditions,
+        speedControl,
         faintedAllies,
         firstActionSinceSwitchIn,
         attackerItem: me.item,
+        opponentMegaUsed,
       });
       const action: SlotMoveAction = {kind: 'move', slot, moveIndex: j + 1};
       if (spec.target) action.target = spec.target;
@@ -144,7 +159,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
       if (canMega) {
         options.push({
           key: `${key}_mega`,
-          label: `${label} — MEGA EVOLVE ${species} into ${megaNameOf(dex, species, me.item)} with this move (your team's only Mega; stats and ability change immediately)`,
+          label: `${label} — MEGA EVOLVE ${species} into ${megaSummaryOf(dex, species, me.item)} with this move (your team's only Mega; the form change resolves before any moves this turn, so the new ability and stats including Speed apply immediately; declaring it early is usually better — the Mega is wasted if this Pokemon faints before you declare it)`,
           action: {...action, mega: true},
         });
       }
@@ -167,6 +182,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
 /** 每个参战槽位一个问题：action_slot_1 / action_slot_2 */
 export function buildTurnPlans(input: TurnInput): SlotQuestionPlan[] {
   const foes = opponentActives(input.dex, input.tracker.state).filter(a => a.status !== 'fnt' && a.hpPercent > 0);
+  const speedText = speedControlText(input.tracker.state, input.tracker.state.ourSideId ?? input.request.side.id);
   const plans: SlotQuestionPlan[] = [];
   const activeCount = input.request.active?.length ?? 0;
   for (let i = 0; i < activeCount; i++) {
@@ -181,7 +197,7 @@ export function buildTurnPlans(input: TurnInput): SlotQuestionPlan[] {
       options,
       question: {
         type: 'choice',
-        instructions: `${TURN_INTRO} It is turn ${input.tracker.state.turn}. Choose the action for slot ${slot}.`,
+        instructions: `${TURN_INTRO} It is turn ${input.tracker.state.turn}.${speedText ? ` ${speedText}` : ''} Choose the action for slot ${slot}.`,
         criteria,
       },
     });

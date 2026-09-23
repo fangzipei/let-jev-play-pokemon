@@ -1,9 +1,10 @@
-import {canMegaWith, speciesTypes, type DexData} from '../dex/index.js';
+import {canMegaWith, megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
 import {effectiveness, estimateDamagePercent, knownEffectiveness} from './calc.js';
 import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OurSpeed, type TeamThreat} from './analysis.js';
 import type {OpponentNoteSet} from './opponent-notes.js';
 import {toId} from './protocol.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
+import {speedControlOf, turnsPhrase, type SpeedControl} from './speed-control.js';
 import type {BattleState, PokemonState} from './tracker.js';
 
 export interface OpponentActive {
@@ -144,6 +145,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     weather: state.weather ?? null,
     field: state.fieldConditions,
     our_side_conditions: ourSideState?.sideConditions ?? [],
+    speed_control: speedControlOf(state, ourSideId),
     sides: {ours, opponent},
     recent_log: state.log.slice(-10),
     ...(analysis ? {analysis_notes: `${DAMAGE_CAVEAT}; potential STAB is type-only, not revealed moves; opponent actual speed and move order unknown`} : {}),
@@ -165,12 +167,16 @@ export interface MoveOptionInput {
   weather?: string;
   /** 当前场地条件（如已激活的 Trick Room），用于场地类战术注解 */
   fieldConditions?: string[];
+  /** 当前控速状态（顺风/空间/天气剩余回合）；传入时启用量回合数的控速注解 */
+  speedControl?: SpeedControl;
   /** 我方已阵亡数量（Last Respects 按此成长威力） */
   faintedAllies?: number;
   /** true = 本回合是该宝可梦本次上场后的首个行动回合（Fake Out 窗口、讲究锁招） */
   firstActionSinceSwitchIn?: boolean;
   /** 使用者的持道具（讲究类道具锁招注解） */
   attackerItem?: string;
+  /** 对手本场是否已用掉 Mega 进化（true 时不再提示目标 Mega 免疫风险） */
+  opponentMegaUsed?: boolean;
 }
 
 /** Last Respects 真实威力：50 基础 + 每名已阵亡队友 50（PS basePowerCallback） */
@@ -184,6 +190,25 @@ function lastRespectsPower(input: MoveOptionInput): number | undefined {
   return LAST_RESPECTS_BASE_POWER + LAST_RESPECTS_BASE_POWER * input.faintedAllies;
 }
 
+/** Mega 形态特性对特定属性的免疫（属性型免疫表，用于招式警示） */
+const MEGA_ABILITY_IMMUNITY: Record<string, string> = {
+  levitate: 'ground', flashfire: 'fire', lightningrod: 'electric', motordrive: 'electric',
+  voltabsorb: 'electric', waterabsorb: 'water', dryskin: 'water', stormdrain: 'water',
+  sapsipper: 'grass', eartheater: 'ground', wellbakedbody: 'fire', windrider: 'flying',
+};
+
+/** 目标可能 Mega 后其特性免疫该招式属性时的警示；目标已是 Mega 形态时不提示。 */
+function megaImmunityWarning(dex: DexData, targetSpecies: string, moveType: string): string | null {
+  if (/mega[xy]?$/.test(toId(targetSpecies))) return null;
+  for (const mega of megaFormsOf(dex, targetSpecies)) {
+    const ability = Object.values(mega.abilities ?? {})[0];
+    const immuneType = ability ? MEGA_ABILITY_IMMUNITY[toId(ability)] : undefined;
+    if (!immuneType || toId(moveType) !== immuneType) continue;
+    return `caution: ${targetSpecies} can Mega Evolve into ${mega.name} before any moves this turn; if it does, ${ability} makes this ${moveType}-type move deal no damage`;
+  }
+  return null;
+}
+
 /** move 选项级战术注解：全部由真实机制与当前对局数据驱动，不设物种白名单 */
 function moveTacticNotes(input: MoveOptionInput): string[] {
   const notes: string[] = [];
@@ -191,9 +216,21 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
   if (!move) return notes;
   const moveId = toId(input.moveId);
   if (moveId === 'trickroom') {
-    notes.push((input.fieldConditions ?? []).some(f => toId(f.replace(/^move:\s*/i, '')) === 'trickroom')
-      ? 'Trick Room is already active: using it again cancels the current Trick Room instead of extending it'
-      : 'Trick Room lasts 5 turns; within each priority bracket the slower Pokemon moves first (speed stats themselves are unchanged); at -7 priority it resolves last this turn');
+    const tr = input.speedControl?.trick_room;
+    const legacyActive = (input.fieldConditions ?? []).some(f => toId(f.replace(/^move:\s*/i, '')) === 'trickroom');
+    if (tr) {
+      notes.push(`Trick Room is already active with ${turnsPhrase(tr.turns_left)}: using it again cancels the current Trick Room instead of extending it`);
+    } else if (legacyActive) {
+      notes.push('Trick Room is already active: using it again cancels the current Trick Room instead of extending it');
+    } else {
+      notes.push('Trick Room lasts 5 turns; within each priority bracket the slower Pokemon moves first (speed stats themselves are unchanged); at -7 priority it resolves last this turn');
+    }
+  }
+  if (moveId === 'tailwind' && input.speedControl) {
+    const tw = input.speedControl.our_tailwind;
+    notes.push(tw
+      ? `Tailwind is already active on your side with ${turnsPhrase(tw.turns_left)}: using it again will fail, it does not extend or restart the current Tailwind`
+      : 'Tailwind lasts 4 turns; a side can only have one Tailwind, so using it while one is already active fails');
   }
   const bp = lastRespectsPower(input);
   if (bp !== undefined) {
@@ -232,6 +269,10 @@ export function describeMoveOption(input: MoveOptionInput): string {
       });
       const eff = effectiveness(input.dex, move.type, speciesTypes(input.dex, input.target.species));
       extras.push(`vs ${input.target.label} (${input.target.species}, ${input.target.hpPercent}% HP): ≈${pct ?? '?'}% damage${eff !== 1 ? ` (${eff}x)` : ''}`);
+      if (input.opponentMegaUsed !== true) {
+        const warning = megaImmunityWarning(input.dex, input.target.species, move.type);
+        if (warning) extras.push(warning);
+      }
     } else {
       extras.push('(no single direct target)');
     }

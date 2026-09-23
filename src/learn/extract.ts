@@ -67,7 +67,8 @@ export function extractObservation(
     if (!line) continue;
     const [a0, a1] = line.args;
     if (line.type === 'player') {
-      if (a0) playerNames[a0] = a1 ?? '';
+      // 赛后会出现空名 |player|pX| 行（对手离开房间），不得覆盖赛内有效名字
+      if (a0 && a1?.trim()) playerNames[a0] = a1.trim();
       continue;
     }
     if (line.type === 'poke') {

@@ -1,4 +1,4 @@
-import {hpPercent, parseCondition, parseDetails, parseIdent, parseLine} from './protocol.js';
+import {hpPercent, parseCondition, parseDetails, parseIdent, parseLine, toId} from './protocol.js';
 
 export interface PokemonState {
   ident: string;
@@ -31,6 +31,8 @@ export interface SideState {
   teamSize: number;
   pokemon: PokemonState[];
   sideConditions: string[];
+  /** sideConditions 各项的激活回合（key = toId 归一化名），用于计算控速剩余回合 */
+  sideConditionTurns: Record<string, number>;
   megaUsed: boolean;
 }
 
@@ -38,7 +40,13 @@ export interface BattleState {
   id: string;
   turn: number;
   weather?: string;
+  /** 当前天气的激活回合（|weather|[upkeep] 不重置） */
+  weatherStartTurn?: number;
+  /** 天气时长是否被对应岩石道具延长为 8 回合；undefined = 设置者道具未知 */
+  weatherRock?: boolean;
   fieldConditions: string[];
+  /** fieldConditions 各项的激活回合（key = toId 归一化名） */
+  fieldConditionTurns: Record<string, number>;
   sides: Record<string, SideState>;
   ourSideId: string | null;
   winner?: string;
@@ -47,7 +55,7 @@ export interface BattleState {
 }
 
 function newSide(id: string): SideState {
-  return {id, teamSize: 6, pokemon: [], sideConditions: [], megaUsed: false};
+  return {id, teamSize: 6, pokemon: [], sideConditions: [], sideConditionTurns: {}, megaUsed: false};
 }
 
 function newPokemon(sideId: string, name: string, species: string): PokemonState {
@@ -58,13 +66,23 @@ function newPokemon(sideId: string, name: string, species: string): PokemonState
   };
 }
 
+/** 岩石道具 → 可延长的天气（PS conditions.ts durationCallback 的 hasItem 检查） */
+const WEATHER_ROCK_EXTENDS: Record<string, string[]> = {
+  damprock: ['raindance'], heatrock: ['sunnyday'], smoothrock: ['sandstorm'], icyrock: ['snowscape', 'hail', 'snow'],
+};
+
+/** 条件名归一化：剥掉 'move: ' 前缀再 toId（与 analysis.hasCondition 同规则），如 'move: Tailwind' → 'tailwind' */
+function conditionKey(name: string): string {
+  return toId(name.replace(/^move:\s*/i, ''));
+}
+
 /** 把 |switch| 里的形态 id 归一化（如 rotomwash -> Rotom-Wash）不做处理，直接用协议原名 */
 export class BattleTracker {
   readonly state: BattleState;
 
   constructor(battleId: string, private ourName: string) {
     this.state = {
-      id: battleId, turn: 0, fieldConditions: [],
+      id: battleId, turn: 0, fieldConditions: [], fieldConditionTurns: {},
       sides: {p1: newSide('p1'), p2: newSide('p2')},
       ourSideId: null, ended: false, log: [],
     };
@@ -103,6 +121,16 @@ export class BattleTracker {
         p.singleTurn = [];
       }
     }
+  }
+
+  /** 从 -weather 的 [of] setter 解析岩石延长：true/false 为道具已确认，undefined 为未知 */
+  private weatherRockOf(args: string[], weather: string): boolean | undefined {
+    const of = args.find(a => a.startsWith('[of]'));
+    const ident = of ? parseIdent(of.replace(/^\[of\]\s*/, '')) : null;
+    const p = ident ? this.findPokemon(ident.side, ident.name) : undefined;
+    const item = toId(p?.item ?? '');
+    if (!item) return undefined;
+    return WEATHER_ROCK_EXTENDS[item]?.includes(toId(weather)) ?? false;
   }
 
   handleLine(raw: string): void {
@@ -264,29 +292,44 @@ export class BattleTracker {
         for (const side of Object.values(s.sides)) for (const p of side.pokemon) p.boosts = {};
         break;
       }
-      case '-weather':
-        s.weather = a0 || undefined;
+      case '-weather': {
+        if (a1 === '[upkeep]') break; // 心跳行不改变天气状态也不重置起始回合
+        const weather = a0 && a0 !== 'none' ? a0 : undefined;
+        s.weather = weather;
+        // 天气特性在 |turn|1 之前设置（s.turn=0），按第 1 回合起算；回合中设置则为当前回合
+        s.weatherStartTurn = weather ? (s.turn || 1) : undefined;
+        s.weatherRock = weather ? this.weatherRockOf(line.args, weather) : undefined;
         break;
+      }
       case '-fieldstart':
-        if (a0 && !s.fieldConditions.includes(a0)) s.fieldConditions.push(a0);
+        if (a0) {
+          if (!s.fieldConditions.includes(a0)) s.fieldConditions.push(a0);
+          s.fieldConditionTurns[conditionKey(a0)] = s.turn;
+        }
         break;
       case '-fieldend':
         s.fieldConditions = s.fieldConditions.filter(f => f !== a0);
+        if (a0) delete s.fieldConditionTurns[conditionKey(a0)];
         break;
       case '-sidestart': {
-        const sc = this.side(a0.split(':')[0].trim()).sideConditions;
-        if (a1 && !sc.includes(a1)) sc.push(a1);
+        const side = this.side(a0.split(':')[0].trim());
+        if (a1 && !side.sideConditions.includes(a1)) side.sideConditions.push(a1);
+        if (a1) side.sideConditionTurns[conditionKey(a1)] = s.turn;
         break;
       }
       case '-sideend': {
         const side = this.side(a0.split(':')[0].trim());
         side.sideConditions = side.sideConditions.filter(c => c !== a1);
+        if (a1) delete side.sideConditionTurns[conditionKey(a1)];
         break;
       }
       case '-swapsideconditions': {
         const tmp = s.sides.p1.sideConditions;
         s.sides.p1.sideConditions = s.sides.p2.sideConditions;
         s.sides.p2.sideConditions = tmp;
+        const tmpTurns = s.sides.p1.sideConditionTurns;
+        s.sides.p1.sideConditionTurns = s.sides.p2.sideConditionTurns;
+        s.sides.p2.sideConditionTurns = tmpTurns;
         break;
       }
       case '-item': {

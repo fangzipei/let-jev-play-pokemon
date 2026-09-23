@@ -3,6 +3,7 @@ import {buildTurnPlans, megaNameOf} from '../src/decide/turn.js';
 import {buildPreviewQuestions, PREVIEW_QUESTION_NAMES} from '../src/decide/team-preview.js';
 import {buildSwitchPlans} from '../src/decide/force-switch.js';
 import {buildAnalysisContext} from '../src/state/analysis.js';
+import {BattleTracker} from '../src/state/tracker.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 
 const dex = mkDex();
@@ -145,5 +146,73 @@ describe('buildTurnPlans', () => {
     const trickRoom = plans[1].options.find(o => o.key === 'move_3');
     expect(trickRoom?.label).toMatch(/5 turns/);
     expect(trickRoom?.label).toMatch(/priority bracket/);
+  });
+
+  it('mega 选项标注时机引导：形态升级即刻生效、唯一且阵亡前未声明即浪费', () => {
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    const mega = plans[0].options.find(o => o.key === 'move_1_foe_a_mega');
+    expect(mega?.label).toMatch(/MEGA EVOLVE Golisopod into Golisopod-Mega/);
+    expect(mega?.label).toMatch(/ability Tough Claws/);
+    expect(mega?.label).toMatch(/Speed 40/);
+    expect(mega?.label).toMatch(/only Mega/);
+    expect(mega?.label).toMatch(/before any moves/);
+    expect(mega?.label).toMatch(/faints/);
+  });
+
+  it('目标 Mega 形态特性免疫招式属性时 criteria 给出警示；对手已用 Mega 后撤除', () => {
+    const data = mkDex();
+    data.species.latias = {name: 'Latias', types: ['Dragon', 'Psychic'], baseStats: {hp: 80, atk: 80, def: 90, spa: 110, spd: 130, spe: 110}, abilities: {0: 'Levitate'}};
+    data.species.latiasmega = {name: 'Latias-Mega', types: ['Dragon', 'Psychic'], baseStats: {hp: 80, atk: 100, def: 120, spa: 140, spd: 150, spe: 110}, abilities: {0: 'Levitate'}, baseSpecies: 'Latias', requiredItem: 'Latiasite'};
+    const tracker = new BattleTracker('battle-mega-warn', 'JevBot1234');
+    for (const line of [
+      '|player|p1|JevBot1234|1|1500', '|player|p2|opponent|2|1500',
+      '|poke|p1|Golisopod, L50, M|', '|poke|p1|Chandelure, L50, F|',
+      '|poke|p2|Latias, L50, F|', '|poke|p2|Charizard, L50, M|',
+      '|teampreview|4', '|teamsize|p1|4', '|teamsize|p2|4', '|start',
+      '|switch|p1a: Golisopod|Golisopod, L50, M|150/150',
+      '|switch|p1b: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Latias|Latias, L50, F|100/100',
+      '|switch|p2b: Charizard|Charizard, L50, M|100/100',
+      '|turn|1',
+    ]) tracker.handleLine(line);
+    const request = mkRequest();
+    const option = () => buildTurnPlans({dex: data, request, tracker})[0].options.find(o => o.key === 'move_2_foe_a');
+    expect(option()?.label).toMatch(/Levitate/);
+    expect(option()?.label).toMatch(/deal no damage/);
+    tracker.handleLine('|-mega|p2b: Charizard|Charizard-Mega-Y');
+    expect(option()?.label).not.toMatch(/Levitate/);
+  });
+});
+
+/** 有双方控速 + 空间的对局：t1 对手顺风、t3 我方顺风/空间，当前 t4 */
+function trackerWithControls(): BattleTracker {
+  const tracker = mkTracker();
+  for (const line of ['|-sidestart|p2: opponent|move: Tailwind', '|turn|3', '|-sidestart|p1: JevBot1234|move: Tailwind',
+    '|-fieldstart|move: Trick Room|[of] p2a: Victreebel', '|turn|4']) {
+    tracker.handleLine(line);
+  }
+  return tracker;
+}
+
+describe('控速摘要注入 instructions', () => {
+  it('普通回合 instructions 含双方剩余回合与作用说明', () => {
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker: trackerWithControls()});
+    const instructions = plans[0].question.instructions;
+    expect(instructions).toContain('Speed control');
+    expect(instructions).toContain('Trick Room is active with 4 more turns including this one');
+    expect(instructions).toContain('Foe-side Tailwind is active with 1 more turn including this one');
+    expect(instructions).toContain('Your-side Tailwind is active with 3 more turns including this one');
+    expect(instructions).toContain('Choose the action for slot 1');
+  });
+  it('无任何控速时 instructions 不注入空话', () => {
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    expect(plans[0].question.instructions).not.toContain('Speed control');
+  });
+  it('强制换人 instructions 同样注入控速摘要', () => {
+    const request = mkRequest({forceSwitch: [true, false]});
+    const plans = buildSwitchPlans({dex, request, tracker: trackerWithControls()});
+    expect(plans[0].question.instructions).toContain('Speed control');
+    expect(plans[0].question.instructions).toContain('Trick Room is active with 4 more turns including this one');
+    expect(plans[0].question.instructions).toContain('This is slot 1');
   });
 });

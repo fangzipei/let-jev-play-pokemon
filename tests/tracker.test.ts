@@ -234,4 +234,97 @@ describe('BattleTracker', () => {
     t.handleLine('|-end|p1a: Excadrill|move: Taunt');
     expect(excadrill.volatiles).toEqual([]);
   });
+
+  it('side/field condition 记录激活回合，结束事件清除记录', () => {
+    const mid = new BattleTracker('battle-test-mid', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|turn|1',
+      '|-sidestart|p2: them|move: Tailwind',
+      '|-fieldstart|move: Trick Room|[of] p1a: Chandelure',
+      '|turn|2',
+    ]) mid.handleLine(line);
+    expect(mid.state.sides.p2.sideConditionTurns).toEqual({tailwind: 1});
+    expect(mid.state.fieldConditionTurns).toEqual({trickroom: 1});
+    mid.handleLine('|-sideend|p2: them|move: Tailwind');
+    mid.handleLine('|-fieldend|move: Trick Room');
+    expect(mid.state.sides.p2.sideConditions).toEqual([]);
+    expect(mid.state.sides.p2.sideConditionTurns).toEqual({});
+    expect(mid.state.fieldConditions).toEqual([]);
+    expect(mid.state.fieldConditionTurns).toEqual({});
+  });
+
+  it('-swapsideconditions 同时互换激活回合记录', () => {
+    const t = new BattleTracker('battle-test', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|turn|1',
+      '|-sidestart|p1: us|move: Tailwind',
+      '|turn|2',
+      '|-swapsideconditions',
+    ]) t.handleLine(line);
+    expect(t.state.sides.p1.sideConditions).toEqual([]);
+    expect(t.state.sides.p1.sideConditionTurns).toEqual({});
+    expect(t.state.sides.p2.sideConditions).toEqual(['move: Tailwind']);
+    expect(t.state.sides.p2.sideConditionTurns).toEqual({tailwind: 1});
+  });
+
+  it('天气记录激活回合与岩石延长判定；upkeep 不重置；none 清除', () => {
+    const t = new BattleTracker('battle-test', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|switch|p2b: Tyranitar|Tyranitar, L50, M|100/100',
+      '|-item|p2b: Tyranitar|Smooth Rock',
+      '|turn|1',
+      '|-weather|Sandstorm|[from] ability: Sand Stream|[of] p2b: Tyranitar',
+    ]) t.handleLine(line);
+    expect(t.state.weather).toBe('Sandstorm');
+    expect(t.state.weatherStartTurn).toBe(1);
+    expect(t.state.weatherRock).toBe(true);
+    t.handleLine('|turn|2');
+    t.handleLine('|-weather|Sandstorm|[upkeep]');
+    expect(t.state.weatherStartTurn).toBe(1);
+    t.handleLine('|turn|3');
+    t.handleLine('|-weather|RainDance');
+    expect(t.state.weather).toBe('RainDance');
+    expect(t.state.weatherStartTurn).toBe(3);
+    expect(t.state.weatherRock).toBeUndefined();
+    t.handleLine('|-weather|none');
+    expect(t.state.weather).toBeUndefined();
+    expect(t.state.weatherStartTurn).toBeUndefined();
+    expect(t.state.weatherRock).toBeUndefined();
+  });
+
+  it('岩石只延长对应天气；设置者道具未揭示时为未知', () => {
+    const mismatched = new BattleTracker('battle-test-rock', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|switch|p2b: Politoed|Politoed, L50, M|100/100',
+      '|-item|p2b: Politoed|Heat Rock',
+      '|turn|1',
+      '|-weather|RainDance|[from] ability: Drizzle|[of] p2b: Politoed',
+    ]) mismatched.handleLine(line);
+    expect(mismatched.state.weatherRock).toBe(false);
+    const unknown = new BattleTracker('battle-test-unknown', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|turn|1',
+      '|-weather|SunnyDay|[from] ability: Drought|[of] p2b: Torkoal',
+    ]) unknown.handleLine(line);
+    expect(unknown.state.weatherStartTurn).toBe(1);
+    expect(unknown.state.weatherRock).toBeUndefined();
+  });
+
+  it('缺参数的 -sideend/-fieldend 不抛异常且不误删记录', () => {
+    const t = new BattleTracker('battle-test-end', 'us');
+    for (const line of [
+      '|player|p1|us|', '|player|p2|them|',
+      '|turn|1',
+      '|-sidestart|p2: them|move: Tailwind',
+    ]) t.handleLine(line);
+    expect(() => t.handleLine('|-sideend|p2: them')).not.toThrow();
+    expect(() => t.handleLine('|-fieldend')).not.toThrow();
+    expect(t.state.sides.p2.sideConditions).toEqual(['move: Tailwind']);
+    expect(t.state.sides.p2.sideConditionTurns).toEqual({tailwind: 1});
+  });
 });

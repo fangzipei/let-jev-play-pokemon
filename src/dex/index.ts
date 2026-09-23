@@ -47,6 +47,14 @@ export function canMegaWith(dex: DexData, species: string, item: string | undefi
   );
 }
 
+/** 该物种的全部 Mega 形态（含 X/Y 变体，按 baseSpecies 匹配） */
+export function megaFormsOf(dex: DexData, species: string): SpeciesInfo[] {
+  const base = toId(dex.species[toId(species)]?.baseSpecies ?? species).replace(/mega[xy]?$/, '');
+  return Object.values(dex.species).filter(
+    s => !!s.requiredItem && toId(s.baseSpecies ?? '').replace(/mega[xy]?$/, '') === base,
+  );
+}
+
 export function normalizeSpecies(raw: Record<string, unknown>): Record<string, SpeciesInfo> {
   const out: Record<string, SpeciesInfo> = {};
   for (const [id, s] of Object.entries(filterDataTable('pokedex', raw))) {

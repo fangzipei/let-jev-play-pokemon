@@ -190,7 +190,7 @@ async function runWithJev(
   const analysis = buildAnalysisContext({dex: ctx.dex, state: ctx.tracker.state, request: ctx.request, level});
   const ourSideId = ctx.tracker.state.ourSideId ?? ctx.request.side.id;
   const opponentNotes = level >= 2
-    ? buildOpponentNotes({state: ctx.tracker.state, ourSideId, pika: ctx.pika, memory: ctx.memory})
+    ? buildOpponentNotes({state: ctx.tracker.state, ourSideId, pika: ctx.pika, memory: ctx.memory, dex: ctx.dex})
     : undefined;
   const state = structuredClone(buildStatePayload({state: ctx.tracker.state, request: ctx.request, dex: ctx.dex, analysis, opponentNotes}));
   // 在第一次 await 之前固定本次请求的状态和合法选项；advisor 与 jev 使用同一份快照。

@@ -2,6 +2,7 @@ import type {DexData} from '../dex/index.js';
 import type {AnalysisContext} from '../state/analysis.js';
 import {benchEntries, teamSlotOf, type BattleRequest} from '../state/request.js';
 import {describeSwitchOption, opponentActives} from '../state/serialize.js';
+import {speedControlText} from '../state/speed-control.js';
 import type {BattleTracker} from '../state/tracker.js';
 import type {SlotOption, SlotQuestionPlan} from './turn.js';
 
@@ -14,6 +15,7 @@ export function buildSwitchPlans(input: {dex: DexData; request: BattleRequest; t
   const forceSwitch = input.request.forceSwitch ?? [];
   const foes = opponentActives(input.dex, input.tracker.state).filter(a => a.status !== 'fnt' && a.hpPercent > 0);
   const bench = benchEntries(input.request);
+  const speedText = speedControlText(input.tracker.state, input.tracker.state.ourSideId ?? input.request.side.id);
   const plans: SlotQuestionPlan[] = [];
   for (let i = 0; i < forceSwitch.length; i++) {
     if (!forceSwitch[i]) continue;
@@ -35,7 +37,7 @@ export function buildSwitchPlans(input: {dex: DexData; request: BattleRequest; t
       options,
       question: {
         type: 'choice',
-        instructions: `${SWITCH_INTRO} This is slot ${slot}.`,
+        instructions: `${SWITCH_INTRO}${speedText ? ` ${speedText}` : ''} This is slot ${slot}.`,
         criteria,
       },
     });

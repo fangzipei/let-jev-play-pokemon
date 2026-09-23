@@ -42,7 +42,7 @@ PowerShell：`Copy-Item .env.example .env`。然后在 `.env` 里填 `OPENROUTER
 | `JEV_MEMORY_DIR` | `.cache/jev-memory` | 跨局经验库目录（不入库）；`npm run review` 读写 |
 | `JEV_REVIEW_MODEL` | （空） | `npm run review` 的复盘模型 id；留空 = 仅规则提取 |
 | `JEV_REVIEW_API_KEY` | （空） | 留空或仅空白时复用 `OPENROUTER_API_KEY` |
-| `JEV_REVIEW_MAX_TOKENS` | `2048` | 复盘单次输出上限；须为正安全整数 |
+| `JEV_REVIEW_MAX_TOKENS` | （空） | 复盘单次输出上限（含推理 token）；留空或仅空白 = 不发送 `max_tokens`（不限制）；设置须为正安全整数 |
 | `PS_SERVER` | `wss://sim3.psim.us/showdown/websocket` | Showdown WebSocket 地址 |
 | `PS_USERNAME` | （空→随机） | 登录名；留空自动生成 `JevBot####` 游客名 |
 | `PS_PASSWORD` | （空） | 密码；游客模式留空 |
@@ -55,7 +55,7 @@ PowerShell：`Copy-Item .env.example .env`。然后在 `.env` 里填 `OPENROUTER
 | `LOG_DIR` | `logs` | 日志目录 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` |
 
-三个超时/预算变量必须是 `1` 至 `2147483647` 的整数毫秒数；非法值在启动校验时拒绝，不静默回退。`JEV_RETRY` 必须是非负安全整数。`JEV_ADVISOR_MAX_TOKENS`、`JEV_PIKA_CUTOFF` 与 `JEV_REVIEW_MAX_TOKENS` 必须是正安全整数。非空 `JEV_ADVISOR_REASONING` 必须是 `low`、`medium` 或 `high` 之一。非 mock 正常启动仍要求主 API key；独立 advisor key 不能代替 jev 主 key。
+三个超时/预算变量必须是 `1` 至 `2147483647` 的整数毫秒数；非法值在启动校验时拒绝，不静默回退。`JEV_RETRY` 必须是非负安全整数。`JEV_ADVISOR_MAX_TOKENS` 与 `JEV_PIKA_CUTOFF` 必须是正安全整数；非空 `JEV_REVIEW_MAX_TOKENS` 必须是正安全整数（留空或仅空白表示不限制）。非空 `JEV_ADVISOR_REASONING` 必须是 `low`、`medium` 或 `high` 之一。非 mock 正常启动仍要求主 API key；独立 advisor key 不能代替 jev 主 key。
 
 ## 三级上下文与预算
 
@@ -72,7 +72,7 @@ PowerShell：`Copy-Item .env.example .env`。然后在 `.env` 里填 `OPENROUTER
 L2 起每只对手宝可梦在 `state` 中带上 `notes`（仅非空字段出现）：`confirmed` 局内已确认的配置与形态，`recent_actions` 最近两回合的实际动作与结果，`assumed` Pikalytics 统计先验，`memory` 跨局经验条目。先验与经验仅作决策辅助，缺失时静默降级，不影响决策流程。
 
 - **Pikalytics 先验**：play 启动时按 `PS_FORMAT` 与 `JEV_PIKA_CUTOFF` 拉取使用率榜单，详情端点顺序节流补全；缓存按 dataDate 存放于 `JEV_PIKA_DIR`（赛制不符不作为有效结果，仅网络完全不可用时退回最新缓存）。先验条目带 `(prior: Pikalytics <dataDate>)` 来源标记，与局内已确认信息严格区分；preview 另附对手首发倾向（leads 占比 top-3）。任何拉取失败都静默降级，`JEV_PIKA_ENABLED=0` 时不注入假设；先验是统计概括，不代表对手实际配置。
-- **跨局经验库**：`npm run review` 扫描 `LOG_DIR` 下的 protocol 日志增量入 `JEV_MEMORY_DIR/memory.json`（按 battleId 幂等去重），按物种与两两组合累计对局数、胜负与已揭示配置；配置 `JEV_REVIEW_MODEL` 时再由模型提炼模式级经验（每物种/组合至多保留 3 条，失败仅保留规则提取）。review 不自动执行，`--dry-run` 只统计不写库。
+- **跨局经验库**：`npm run review` 扫描 `LOG_DIR` 下的 protocol 日志增量入 `JEV_MEMORY_DIR/memory.json`（按 battleId 幂等去重），按物种与两两组合累计对局数、胜负与已揭示配置；配置 `JEV_REVIEW_MODEL` 时再由模型提炼模式级经验：默认不发送 `max_tokens`（不限制推理与输出），让模型自由推理后按严格 JSON 输出（每物种/组合至多保留 3 条，失败仅保留规则提取）。review 不自动执行，`--dry-run` 只统计不写库。
 
 ## dex 数据
 

@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {parsePikaList} from '../src/dex/pikalytics.js';
 import {buildOpponentNotes, leadPriorLines} from '../src/state/opponent-notes.js';
 import {BattleTracker} from '../src/state/tracker.js';
-import {mkTracker} from './helpers.js';
+import {mkDex, mkTracker} from './helpers.js';
 
 // 与 pikalytics.test.ts 的 LIST_FIXTURE 保持一致，此处本地定义：
 // 跨测试文件 import 会让被导入文件的 describe/it 在本文件重复注册（计数翻倍）。
@@ -187,12 +187,131 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
     const none = buildOpponentNotes({state: tracker.state, ourSideId: 'p1'});
     expect(none['p2: Metagross'].assumed).toEqual([]);
   });
+
+  const megaDex = () => {
+    const dex = mkDex();
+    dex.species.metagrossmega = {
+      name: 'Metagross-Mega', types: ['Steel', 'Psychic'],
+      baseStats: {hp: 80, atk: 145, def: 150, spa: 105, spd: 110, spe: 110},
+      abilities: {0: 'Tough Claws'}, baseSpecies: 'Metagross', requiredItem: 'Metagrossite',
+    };
+    return dex;
+  };
+
+  const megaPika = (withLeads = false) => parsePikaList([{
+    name: 'Metagross-Mega', rank: '9', percent: '5.1', winPercent: '50',
+    stats: {hp: 80, atk: 145, def: 150, spa: 105, spd: 110, spe: 110},
+    abilities: [{ability: 'Tough Claws', percent: '99'}],
+    items: [{item: 'Metagrossite', percent: '98'}, {item: 'Leftovers', percent: '2'}],
+    moves: [{move: 'Iron Head', percent: '55', type: 'steel'}],
+    team: [],
+    leads: withLeads ? [{pokemon: 'Metagross', games: 10, percent: '22.5', winPercent: '50'}] : [],
+  }], '2026-05', 'f');
+
+  it('先验道具含 Mega 石时给出 Mega 威胁：形态、特性与速度变化', () => {
+    const notes = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()});
+    const text = notes['p2: Metagross'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/i);
+    expect(text).toContain('Metagross-Mega');
+    expect(text).toContain('Tough Claws');
+    expect(text).toMatch(/Speed 110 \(from 70\)/);
+    expect(text).toContain('Metagrossite 98.0%');
+    expect(text).toContain('(prior: Pikalytics 2026-05)');
+  });
+
+  it('道具已揭示或已消耗、对手已用 Mega、缺 dex 时不输出 Mega 威胁', () => {
+    const noDex = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: megaPika()});
+    expect(noDex['p2: Metagross'].assumed.join(' | ')).not.toMatch(/mega threat/i);
+    const revealed = mkTracker();
+    revealed.handleLine('|-item|p2c: Metagross|Leftovers');
+    const revealedText = buildOpponentNotes({state: revealed.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    expect(revealedText).not.toMatch(/mega threat/i);
+    const consumed = mkTracker();
+    consumed.handleLine('|-item|p2c: Metagross|Metagrossite');
+    consumed.handleLine('|-enditem|p2c: Metagross|Metagrossite');
+    const consumedText = buildOpponentNotes({state: consumed.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    expect(consumedText).not.toMatch(/mega threat/i);
+    const used = mkTracker();
+    used.handleLine('|-mega|p2b: Charizard|Charizard-Mega-Y');
+    const usedText = buildOpponentNotes({state: used.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    expect(usedText).not.toMatch(/mega threat/i);
+  });
+
+  it('preview 时 Mega 威胁与 leads 等先验同时保留，不被上限挤掉', () => {
+    const tracker = mkTracker();
+    tracker.state.turn = 0;
+    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika: megaPika(true), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/i);
+    expect(text).toContain('commonly leads');
+  });
 });
 
 describe('leadPriorLines', () => {
   it('按 leads 占比降序取 top，未命中不输出', () => {
     expect(leadPriorLines(pika, ['Sneasler', 'Metagross-Mega', 'Unknownmon'], 3)).toEqual(['Sneasler 14.3%']);
     expect(leadPriorLines(null, ['Sneasler'])).toEqual([]);
+  });
+});
+
+const controlPika = parsePikaList([{
+  name: 'Whimsicott', rank: '7', percent: '8', winPercent: '50', stats: {spe: 116},
+  abilities: [{ability: 'Prankster', percent: '88.1'}],
+  items: [{item: 'Focus Sash', percent: '50.2'}],
+  moves: [{move: 'Tailwind', percent: '72.3'}, {move: 'Moonblast', percent: '60.1'}, {move: 'Encore', percent: '40.4'}],
+  team: [], leads: [],
+}], '2026-05', 'f');
+
+const weatherPika = parsePikaList([{
+  name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
+  abilities: [{ability: 'Chlorophyll', percent: '8.0'}, {ability: 'Solar Power', percent: '10.2'}],
+  items: [], moves: [], team: [], leads: [],
+}], '2026-05', 'f');
+
+describe('buildOpponentNotes 控速预警', () => {
+  it('已揭示但未激活的控速招式给出语义解读', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2a: Victreebel|Tailwind|p2b: Charizard');
+    const confirmed = buildOpponentNotes({state: tracker.state, ourSideId: 'p1'})['p2: Victreebel'].confirmed.join(' | ');
+    expect(confirmed).toContain('moves seen: Tailwind');
+    expect(confirmed).toMatch(/speed-control threat/);
+    expect(confirmed).toMatch(/not active now/);
+    expect(confirmed).toMatch(/doubles its side's Speed for 4 turns/);
+  });
+  it('已揭示且激活中的控速不重复解读（剩余回合由 speed_control 呈现）', () => {
+    const tracker = mkTracker();
+    for (const line of ['|move|p2a: Victreebel|Tailwind|p2b: Charizard', '|-sidestart|p2: opponent|move: Tailwind']) {
+      tracker.handleLine(line);
+    }
+    const confirmed = buildOpponentNotes({state: tracker.state, ourSideId: 'p1'})['p2: Victreebel'].confirmed.join(' | ');
+    expect(confirmed).toContain('moves seen: Tailwind');
+    expect(confirmed).not.toMatch(/speed-control threat/);
+  });
+  it('先验招式含控速时预警，commonly runs 不重复列出', () => {
+    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: controlPika})
+      ['p2: Whimsicott'].assumed.join(' | ');
+    expect(text).toMatch(/speed-control threat/);
+    expect(text).toMatch(/likely Tailwind 72.3%/);
+    expect(text).toMatch(/4 turns/);
+    expect(text).toMatch(/\(prior: Pikalytics 2026-05\)/);
+    expect(text).not.toMatch(/commonly runs:[^|]*Tailwind/);
+    expect(text).toContain('commonly runs: Moonblast 60.1% / Encore 40.4%');
+  });
+  it('未揭示的天气速度特性在当前天气下预警；已揭示或不匹配时不预警', () => {
+    const sunny = mkTracker();
+    sunny.handleLine('|-weather|SunnyDay');
+    const text = buildOpponentNotes({state: sunny.state, ourSideId: 'p1', pika: weatherPika})
+      ['p2: Victreebel'].assumed.join(' | ');
+    expect(text).toMatch(/speed-control threat/);
+    expect(text).toMatch(/likely Chlorophyll 8.0%/);
+    expect(text).toMatch(/SunnyDay/);
+    expect(text).toMatch(/double/);
+    const revealed = mkTracker();
+    revealed.handleLine('|-ability|p2a: Victreebel|Chlorophyll');
+    revealed.handleLine('|-weather|SunnyDay');
+    expect(buildOpponentNotes({state: revealed.state, ourSideId: 'p1', pika: weatherPika})
+      ['p2: Victreebel'].assumed.join(' | ')).not.toMatch(/likely Chlorophyll/);
+    expect(buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: weatherPika})
+      ['p2: Victreebel'].assumed.join(' | ')).not.toMatch(/speed-control threat/);
   });
 });
 

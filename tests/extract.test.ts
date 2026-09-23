@@ -63,4 +63,10 @@ describe('extractObservation', () => {
     const lost = PROTOCOL_LOG.replace('|win|JevBot1234', '|win|rival');
     expect(extractObservation(lost, DECISIONS_JSONL, {battleId: 'b'})?.won).toBe(false);
   });
+  it('赛后空名 |player| 行不覆盖有效名字', () => {
+    const lostWithTail = PROTOCOL_LOG.replace('|win|JevBot1234', '|win|rival') + '\n|player|p2|';
+    expect(extractObservation(lostWithTail, DECISIONS_JSONL, {battleId: 'b'})?.won).toBe(false);
+    const wonWithTail = PROTOCOL_LOG + '\n|player|p1|';
+    expect(extractObservation(wonWithTail, DECISIONS_JSONL)?.won).toBe(true);
+  });
 });

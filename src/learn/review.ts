@@ -10,7 +10,10 @@ export interface ReviewOptions {
   dryRun?: boolean;
   reviewModel?: string;
   reviewApiKey?: string;
+  /** 未设置 = 不发送 max_tokens（不限制输出，含推理 token）；显式设置时必须为正整数。 */
   reviewMaxTokens?: number;
+  /** 解析类瞬时故障重试前的等待毫秒数；默认 2000，0 = 立即重试（测试用）。 */
+  retryDelayMs?: number;
   fetchImpl?: typeof fetch;
   log?: (msg: string) => void;
 }
@@ -26,9 +29,16 @@ export interface ReviewReport {
 
 const CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
-const REVIEW_PROMPT = `You review Pokemon Showdown VGC (doubles) battle logs. Input lines describe past battles: winner, the opponent team, and revealed opponent configurations. Extract recurring, pattern-level lessons that would help future games against these Pokemon. Respond with STRICT JSON only, no markdown fences:
+const REVIEW_PROMPT = `You are the coach of OUR Pokemon Showdown VGC (doubles) team, reviewing our recent ladder battles. Each input line is one battle: the battle id, whether we won or lost, our team, the opponent team, and every opponent Pokemon whose item, ability, moves or lead position was revealed.
+
+Think through all battles carefully before answering: look for repeating opponent habits (leads, move choices, items, abilities, and how the battles ended for us) and turn the ones that would change our future play into short lessons. Then respond with STRICT JSON only, no markdown fences, no commentary:
 {"species":{"Exact Species Name":["one short English lesson"]},"cores":{"SpeciesA+SpeciesB":["one short lesson"]}}
-Only include entries with a real pattern across the provided battles; each value is an array with exactly one string.`;
+
+Rules:
+- Species keys must be copied exactly from the "Opponent species seen" list at the end of the input; never invent names.
+- Core keys are two species seen in the same battles, formatted "SpeciesA+SpeciesB".
+- Each value is an array with exactly one short, concrete, actionable English lesson (one sentence) grounded in the battles above.
+- Include an entry only when a real pattern repeats across the battles; when unsure, leave the section empty.`;
 
 function compactBattle(obs: BattleObservation): string {
   const our = obs.ourSpecies.length ? obs.ourSpecies.join('/') : 'unknown';
@@ -49,43 +59,110 @@ interface ModelNotes {species: Record<string, string[]>; cores: Record<string, s
 /** 单次请求的观察局数上限（控制请求体量与单次延迟）。 */
 const BATCH_SIZE = 20;
 
+/** 宽容补全模型偶发漏掉的闭合括号（字符串感知，不改动字符串内容）。 */
+function repairJson(text: string): string {
+  const out: string[] = [];
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inString) {
+      out.push(ch);
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out.push(ch);
+    } else if (ch === '{' || ch === '[') {
+      stack.push(ch);
+      out.push(ch);
+    } else if (ch === '}' || ch === ']') {
+      const want = ch === '}' ? '{' : '[';
+      while (stack.length && stack[stack.length - 1] !== want) {
+        out.push(stack.pop() === '{' ? '}' : ']');
+      }
+      if (stack.length) stack.pop();
+      out.push(ch);
+    } else {
+      out.push(ch);
+    }
+  }
+  if (inString) out.push('"');
+  while (stack.length) out.push(stack.pop() === '{' ? '}' : ']');
+  return out.join('');
+}
+
 async function collectNotesBatch(
   observations: BattleObservation[],
-  opts: {model: string; apiKey: string; maxTokens: number; fetchImpl?: typeof fetch},
+  opts: {model: string; apiKey: string; maxTokens?: number; retryDelayMs?: number; fetchImpl?: typeof fetch},
 ): Promise<ModelNotes> {
   const doFetch = opts.fetchImpl ?? fetch;
+  const speciesKeys = [...new Set(observations.flatMap(o => o.opponentSpecies))].sort();
+  const userContent = [
+    observations.map(compactBattle).join('\n'),
+    `Opponent species seen (use exactly these keys): ${speciesKeys.join(', ')}`,
+  ].join('\n\n');
   const body = JSON.stringify({
     model: opts.model,
     stream: false,
-    max_tokens: opts.maxTokens,
+    ...(opts.maxTokens !== undefined ? {max_tokens: opts.maxTokens} : {}),
     messages: [
       {role: 'system', content: REVIEW_PROMPT},
-      {role: 'user', content: observations.map(compactBattle).join('\n')},
+      {role: 'user', content: userContent},
     ],
   });
-  const res = await doFetch(CHAT_URL, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json', Authorization: `Bearer ${opts.apiKey}`},
-    body,
-  });
-  if (!res.ok) throw new Error(`review HTTP ${res.status}`);
-  const raw = JSON.parse(await res.text()) as Record<string, any>;
-  const content: unknown = raw?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') throw new Error('review 响应缺少文本');
-  const jsonText = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-  const parsed = JSON.parse(jsonText) as Record<string, unknown>;
-  const pick = (value: unknown): Record<string, string[]> => {
-    if (!value || typeof value !== 'object') return {};
-    const out: Record<string, string[]> = {};
-    for (const [key, notes] of Object.entries(value as Record<string, unknown>)) {
-      if (Array.isArray(notes)) {
-        const clean = notes.filter((n): n is string => typeof n === 'string' && !!n.trim()).slice(0, 1);
-        if (clean.length) out[key] = clean;
-      }
+  const attempt = async (): Promise<ModelNotes> => {
+    const res = await doFetch(CHAT_URL, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json', Authorization: `Bearer ${opts.apiKey}`},
+      body,
+    });
+    if (!res.ok) throw new Error(`review HTTP ${res.status}`);
+    const raw = JSON.parse(await res.text()) as Record<string, any>;
+    const content: unknown = raw?.choices?.[0]?.message?.content;
+    const finish: unknown = raw?.choices?.[0]?.finish_reason;
+    if (typeof content !== 'string') {
+      throw new Error(`review 响应缺少文本${typeof finish === 'string' ? `（finish_reason=${finish}）` : ''}`);
     }
-    return out;
+    const jsonText = content.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    } catch {
+      // 模型长 JSON 偶发漏掉闭合符号：先容错补全再解析
+      parsed = JSON.parse(repairJson(jsonText)) as Record<string, unknown>;
+    }
+    const pick = (value: unknown): Record<string, string[]> => {
+      if (!value || typeof value !== 'object') return {};
+      const out: Record<string, string[]> = {};
+      for (const [key, notes] of Object.entries(value as Record<string, unknown>)) {
+        if (Array.isArray(notes)) {
+          const clean = notes.filter((n): n is string => typeof n === 'string' && !!n.trim()).slice(0, 1);
+          if (clean.length) out[key] = clean;
+        }
+      }
+      return out;
+    };
+    return {species: pick(parsed.species), cores: pick(parsed.cores)};
   };
-  return {species: pick(parsed.species), cores: pick(parsed.cores)};
+  // 解析类错误多为模型输出随机性或上游瞬时返空（如 200 + 空响应）：重试至多两次（共三次尝试）
+  const retryable = (error: unknown): boolean =>
+    error instanceof SyntaxError || (error instanceof Error && error.message.startsWith('review 响应缺少文本'));
+  const delayMs = opts.retryDelayMs ?? 2000;
+  let lastError: unknown;
+  for (let attemptNo = 0; attemptNo < 3; attemptNo++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      lastError = error;
+      if (!retryable(error)) throw error;
+      if (attemptNo < 2 && delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
 }
 
 function mergeNotes(target: ModelNotes, part: ModelNotes): void {
@@ -99,7 +176,7 @@ function mergeNotes(target: ModelNotes, part: ModelNotes): void {
 
 export async function collectModelNotes(
   observations: BattleObservation[],
-  opts: {model: string; apiKey: string; maxTokens: number; fetchImpl?: typeof fetch},
+  opts: {model: string; apiKey: string; maxTokens?: number; retryDelayMs?: number; fetchImpl?: typeof fetch},
 ): Promise<ModelNotes | null> {
   const merged: ModelNotes = {species: {}, cores: {}};
   const batches: BattleObservation[][] = [];
@@ -151,7 +228,7 @@ export async function reviewMemories(opts: ReviewOptions): Promise<ReviewReport>
     try {
       report.modelNotes = await collectModelNotes(report.observations, {
         model: opts.reviewModel, apiKey: opts.reviewApiKey,
-        maxTokens: opts.reviewMaxTokens ?? 2048, fetchImpl: opts.fetchImpl,
+        maxTokens: opts.reviewMaxTokens, retryDelayMs: opts.retryDelayMs, fetchImpl: opts.fetchImpl,
       });
       if (report.modelNotes && !opts.dryRun) {
         const applied = applyModelNotes(memory, report.modelNotes);

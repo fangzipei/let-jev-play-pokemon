@@ -134,8 +134,9 @@ describe('Pikalytics 与复盘配置', () => {
   it('默认值', () => {
     expect(loadConfig(base)).toMatchObject({
       pikaEnabled: true, pikaCutoff: 1760, pikaDir: '.cache/pikalytics',
-      memoryDir: '.cache/jev-memory', reviewModel: '', reviewApiKey: 'sk-test', reviewMaxTokens: 2048,
+      memoryDir: '.cache/jev-memory', reviewModel: '', reviewApiKey: 'sk-test',
     });
+    expect(loadConfig(base).reviewMaxTokens).toBeUndefined();
   });
   it('显式覆盖与 PIKA_ENABLED=0 关闭', () => {
     expect(loadConfig({...base, JEV_PIKA_ENABLED: '0'}).pikaEnabled).toBe(false);
@@ -148,8 +149,12 @@ describe('Pikalytics 与复盘配置', () => {
     for (const value of ['0', '-5', 'NaN', 'abc', '1.5', '']) {
       expect(() => loadConfig({...base, JEV_PIKA_CUTOFF: value})).toThrow(/JEV_PIKA_CUTOFF/);
     }
-    for (const value of ['0', '-1', 'NaN', 'abc', '1.5', '']) {
+    for (const value of ['0', '-1', 'NaN', 'abc', '1.5']) {
       expect(() => loadConfig({...base, JEV_REVIEW_MAX_TOKENS: value})).toThrow(/JEV_REVIEW_MAX_TOKENS/);
     }
+  });
+  it('JEV_REVIEW_MAX_TOKENS 留空或仅空白 = 不限制', () => {
+    expect(loadConfig({...base, JEV_REVIEW_MAX_TOKENS: ''}).reviewMaxTokens).toBeUndefined();
+    expect(loadConfig({...base, JEV_REVIEW_MAX_TOKENS: '   '}).reviewMaxTokens).toBeUndefined();
   });
 });

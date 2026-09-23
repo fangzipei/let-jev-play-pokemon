@@ -1,6 +1,8 @@
+import {megaFormsOf, type DexData} from '../dex/index.js';
 import type {PikaEntry, PikaMeta, PikaPair} from '../dex/pikalytics.js';
 import {queryForOpponent, type MemoryData} from '../learn/store.js';
 import {parseIdent, parseLine, toId} from './protocol.js';
+import {weatherDoublesSpeed} from './speed-control.js';
 import type {BattleState, PokemonState} from './tracker.js';
 
 export interface OpponentNoteSet {
@@ -15,6 +17,8 @@ export interface OpponentNotesInput {
   ourSideId: string;
   pika?: PikaMeta | null;
   memory?: MemoryData | null;
+  /** 对手 Mega 威胁注解需要 dex 中的 Mega 形态数据；缺省不输出该注解 */
+  dex?: DexData;
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -22,6 +26,19 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const RESULT_TYPES = new Set(['-damage', '-status', '-boost', '-fail', '-immune', '-miss']);
+
+/** 控速招式的机制语义（用于未激活时的解读）；tailwind 4 回合、trickroom 5 回合 */
+const CONTROL_MOVE_SEMANTICS: Record<string, string> = {
+  tailwind: "doubles its side's Speed for 4 turns when used",
+  trickroom: 'makes slower Pokemon move first for 5 turns when used',
+};
+
+/** 该个体所在侧的控速条件是否当前激活（tailwind 按侧、trickroom 全局） */
+function controlActiveFor(state: BattleState, sideId: string, moveId: string): boolean {
+  if (moveId === 'trickroom') return state.fieldConditionTurns['trickroom'] !== undefined;
+  if (moveId === 'tailwind') return state.sides[sideId]?.sideConditionTurns['tailwind'] !== undefined;
+  return false;
+}
 
 /** 把日志 ident（`p2a: Sneasler`）归一化到 tracker ident（`p2: Sneasler`）。 */
 export function normalizeIdent(ident: string): string {
@@ -56,6 +73,12 @@ export function confirmedNotes(state: BattleState, p: PokemonState): string[] {
   if (p.ability) notes.push(`ability confirmed: ${p.ability}`);
   if (p.mega) notes.push('Mega evolved');
   if (p.revealedMoves.length) notes.push(`moves seen: ${p.revealedMoves.join(', ')}`);
+  for (const move of p.revealedMoves) {
+    const info = CONTROL_MOVE_SEMANTICS[toId(move)];
+    if (info && !controlActiveFor(state, p.side, toId(move))) {
+      notes.push(`speed-control threat — ${move} revealed (not active now): ${info}`);
+    }
+  }
   return notes;
 }
 
@@ -214,10 +237,53 @@ function topList(list: PikaPair[], n: number): string {
   return list.slice(0, n).map(x => `${x.name} ${x.percent.toFixed(1)}%`).join(' / ');
 }
 
+/** 先验道具含该物种 Mega 石时的 Mega 威胁：形态、特性与速度变化（仅道具未知时推断）。 */
+function megaThreatNote(p: PokemonState, entry: PikaEntry, dex: DexData | undefined, source: string): string | null {
+  if (!dex || p.item || p.consumedItem) return null;
+  for (const mega of megaFormsOf(dex, p.species)) {
+    const stone = mega.requiredItem;
+    const priorItem = stone ? entry.items.find(i => toId(i.name) === toId(stone)) : undefined;
+    if (!priorItem || priorItem.percent <= 0) continue;
+    const ability = Object.values(mega.abilities ?? {})[0];
+    const baseSpe = dex.species[toId(mega.baseSpecies ?? p.species)]?.baseStats.spe;
+    const speed = baseSpe !== undefined && mega.baseStats.spe !== baseSpe
+      ? `Speed ${mega.baseStats.spe} (from ${baseSpe})` : `Speed ${mega.baseStats.spe}`;
+    return `mega threat — likely ${stone} ${priorItem.percent.toFixed(1)}%: Mega form ${mega.name} has ${ability ?? 'an unknown ability'} and ${speed} ${source}`;
+  }
+  return null;
+}
+
+/** 控速先验威胁：先验招式含控速招（未揭示且未激活）或未揭示天气速度特性（当前天气匹配时）。 */
+function speedControlThreatNotes(p: PokemonState, entry: PikaEntry, state: BattleState, source: string): string[] {
+  const notes: string[] = [];
+  const revealed = new Set(p.revealedMoves.map(toId));
+  for (const mv of entry.moves) {
+    const key = toId(mv.name);
+    const info = CONTROL_MOVE_SEMANTICS[key];
+    if (!info || revealed.has(key) || mv.percent <= 0) continue;
+    if (controlActiveFor(state, p.side, key)) continue;
+    notes.push(`speed-control threat — likely ${mv.name} ${mv.percent.toFixed(1)}%: ${info} ${source}`);
+  }
+  if (!p.ability) {
+    for (const ab of entry.abilities) {
+      if (ab.percent <= 0 || !weatherDoublesSpeed(ab.name, state.weather)) continue;
+      notes.push(`speed-control threat — likely ${ab.name} ${ab.percent.toFixed(1)}%: with the current ${state.weather} up its Speed would double ${source}`);
+      break;
+    }
+  }
+  return notes;
+}
+
 /** 合理假设（统计先验）；所有条目带 prior 来源标记，与 confirmed 严格区分。 */
-export function assumedNotes(p: PokemonState, entry: PikaEntry, opts: {dataDate: string; preview: boolean}): string[] {
+export function assumedNotes(
+  p: PokemonState,
+  entry: PikaEntry,
+  opts: {dataDate: string; preview: boolean; dex?: DexData; megaAvailable?: boolean; state?: BattleState},
+): string[] {
   const notes: string[] = [];
   const source = `(prior: Pikalytics ${opts.dataDate})`;
+  const megaNote = opts.megaAvailable === false ? null : megaThreatNote(p, entry, opts.dex, source);
+  if (megaNote) notes.push(megaNote);
   if (!p.item && !p.consumedItem && entry.items.length) {
     notes.push(`item unseen — likely ${topList(entry.items, 3)} ${source}`);
   }
@@ -225,13 +291,16 @@ export function assumedNotes(p: PokemonState, entry: PikaEntry, opts: {dataDate:
     notes.push(`ability unseen — likely ${topList(entry.abilities, 2)} ${source}`);
   }
   const revealed = new Set(p.revealedMoves.map(toId));
-  const missing = entry.moves.slice(0, 3).filter(m => !revealed.has(toId(m.name)));
+  const missing = entry.moves.slice(0, 3).filter(m => !revealed.has(toId(m.name)) && !CONTROL_MOVE_SEMANTICS[toId(m.name)]);
   if (missing.length) notes.push(`commonly runs: ${topList(missing, 3)} ${source}`);
   if (opts.preview && entry.leads.length) {
     const own = entry.leads.find(l => toId(l.name) === toId(p.species));
     if (own && own.percent > 0) notes.push(`commonly leads ${own.percent.toFixed(1)}% of its teams ${source}`);
   }
-  return notes.slice(0, 4);
+  const controlNotes = opts.state ? speedControlThreatNotes(p, entry, opts.state, source) : [];
+  notes.push(...controlNotes);
+  // 常规注解上限 4（Mega 威胁额外 +1）；控速威胁始终保留，不被截断
+  return [...notes.slice(0, 4 + (megaNote ? 1 : 0)), ...controlNotes];
 }
 
 /** 对手预览的 leads 占比概览（team-preview INTRO 用），降序 top-N。 */
@@ -253,6 +322,7 @@ export function buildOpponentNotes(input: OpponentNotesInput): Record<string, Op
   const oppSide = opponentSideId(input.state, input.ourSideId);
   const recent = recentOpponentActions(input.state, input.ourSideId);
   const preview = input.state.turn === 0;
+  const megaAvailable = !input.state.sides[oppSide]?.megaUsed;
   const opponents = input.state.sides[oppSide]?.pokemon ?? [];
   const query = input.memory ? queryForOpponent(input.memory, opponents.map(p => p.species)) : null;
   const out: Record<string, OpponentNoteSet> = {};
@@ -266,7 +336,7 @@ export function buildOpponentNotes(input: OpponentNotesInput): Record<string, Op
     out[p.ident] = {
       confirmed: confirmedNotes(input.state, p),
       recent_actions: recent.get(p.ident) ?? [],
-      assumed: entry && input.pika ? assumedNotes(p, entry, {dataDate: input.pika.dataDate, preview}) : [],
+      assumed: entry && input.pika ? assumedNotes(p, entry, {dataDate: input.pika.dataDate, preview, dex: input.dex, megaAvailable, state: input.state}) : [],
       memory: memoryLines,
     };
   }

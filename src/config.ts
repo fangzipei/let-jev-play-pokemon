@@ -32,7 +32,8 @@ export interface AppConfig {
   memoryDir: string;
   reviewModel: string;
   reviewApiKey: string;
-  reviewMaxTokens: number;
+  /** 未设置 = `npm run review` 不发送 max_tokens（不限制输出，含推理 token）。 */
+  reviewMaxTokens?: number;
 }
 
 function parseAdvisorReasoning(raw: string | undefined): 'low' | 'medium' | 'high' | undefined {
@@ -81,7 +82,7 @@ export function loadConfig(
     memoryDir: env.JEV_MEMORY_DIR ?? '.cache/jev-memory',
     reviewModel: (env.JEV_REVIEW_MODEL ?? '').trim(),
     reviewApiKey: env.JEV_REVIEW_API_KEY?.trim() || mainKey,
-    reviewMaxTokens: Number(env.JEV_REVIEW_MAX_TOKENS ?? 2048),
+    reviewMaxTokens: env.JEV_REVIEW_MAX_TOKENS?.trim() ? Number(env.JEV_REVIEW_MAX_TOKENS) : undefined,
   };
   validateConfig(cfg, opts);
   return cfg;
@@ -110,8 +111,8 @@ export function validateConfig(cfg: AppConfig, opts: {requireApiKey?: boolean} =
   if (!Number.isSafeInteger(cfg.pikaCutoff) || cfg.pikaCutoff <= 0) {
     throw new Error('JEV_PIKA_CUTOFF 必须是正安全整数');
   }
-  if (!Number.isSafeInteger(cfg.reviewMaxTokens) || cfg.reviewMaxTokens <= 0) {
-    throw new Error('JEV_REVIEW_MAX_TOKENS 必须是正安全整数');
+  if (cfg.reviewMaxTokens !== undefined && (!Number.isSafeInteger(cfg.reviewMaxTokens) || cfg.reviewMaxTokens <= 0)) {
+    throw new Error('JEV_REVIEW_MAX_TOKENS 必须是正安全整数（留空或仅空白表示不限制）');
   }
   if (cfg.startMode === 'challenge' && !cfg.challengeUser) {
     throw new Error('CHALLENGE_USER is required when START_MODE=challenge');

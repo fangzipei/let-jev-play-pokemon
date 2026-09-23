@@ -224,6 +224,24 @@ describe('describeMoveOption 战术注解', () => {
     const later = describeMoveOption({...base, firstActionSinceSwitchIn: false});
     expect(later).not.toMatch(/locks this Pokemon into/);
   });
+  it('目标 Mega 形态特性免疫该招式属性时给出警示；已用 Mega 或已成 Mega 形态时不误报', () => {
+    const data = mkDex();
+    data.species.sceptile = {name: 'Sceptile', types: ['Grass'], baseStats: {hp: 70, atk: 85, def: 65, spa: 105, spd: 85, spe: 120}, abilities: {0: 'Overgrow'}};
+    data.species.sceptilemega = {name: 'Sceptile-Mega', types: ['Grass', 'Dragon'], baseStats: {hp: 70, atk: 110, def: 75, spa: 145, spd: 85, spe: 145}, abilities: {0: 'Lightning Rod'}, baseSpecies: 'Sceptile', requiredItem: 'Sceptilite'};
+    const base = {
+      dex: data, moveId: 'thunderbolt', moveName: 'Thunderbolt', pp: 10, maxpp: 10,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190},
+      target: {label: 'Foe A', species: 'Sceptile', hpPercent: 100},
+    };
+    const text = describeMoveOption(base);
+    expect(text).toMatch(/caution/i);
+    expect(text).toContain('Sceptile-Mega');
+    expect(text).toContain('Lightning Rod');
+    expect(text).toMatch(/deal no damage/);
+    expect(describeMoveOption({...base, opponentMegaUsed: true})).not.toMatch(/Lightning Rod/);
+    expect(describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head'})).not.toMatch(/caution/i);
+    expect(describeMoveOption({...base, target: {label: 'Foe A', species: 'Sceptile-Mega', hpPercent: 100}})).not.toMatch(/caution/i);
+  });
 });
 
 describe('describeSwitchOption', () => {
@@ -258,6 +276,7 @@ describe('describePreviewCandidate', () => {
 
 import {buildOpponentNotes} from '../src/state/opponent-notes.js';
 import {parsePikaList} from '../src/dex/pikalytics.js';
+import type {SpeedControl} from '../src/state/speed-control.js';
 
 const pikaFixture = parsePikaList([{
   name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
@@ -305,5 +324,50 @@ describe('buildPreviewQuestions 对手首发先验', () => {
     expect(set.questions.lead_1.instructions).toContain('Victreebel 9.5%');
     const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel'], analysis});
     expect(none.questions.lead_1.instructions).not.toContain('lead tendencies');
+  });
+});
+
+const emptySpeedControl: SpeedControl = {
+  trick_room: null, our_tailwind: null, opponent_tailwind: null, weather: null, opponent_speed_abilities: [],
+};
+
+describe('控速剩余回合注入', () => {
+  it('payload 无 analysis 也输出 speed_control 剩余回合', () => {
+    const tracker = mkTracker();
+    for (const line of ['|turn|3', '|-fieldstart|move: Trick Room|[of] p2a: Victreebel',
+      '|-weather|Sandstorm|[of] p2b: Charizard', '|turn|4']) {
+      tracker.handleLine(line);
+    }
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.speed_control.trick_room).toEqual({started_turn: 3, turns_left: 4});
+    expect(payload.speed_control.weather).toEqual({name: 'Sandstorm', started_turn: 3, turns_left: 4, extended: null});
+    expect(payload.speed_control.our_tailwind).toBeNull();
+  });
+  it('戏法空间已激活时注解带剩余回合与重开取消语义', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5, attackerTypes: ['Ghost'],
+      speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 4}},
+    });
+    expect(text).toContain('Trick Room is already active with 4 more turns including this one');
+    expect(text).toMatch(/cancel/i);
+  });
+  it('顺风注解区分我方已激活（重开失败）与未激活（机制说明）', () => {
+    const base = {dex, moveId: 'tailwind', moveName: 'Tailwind', pp: 15, maxpp: 15, attackerTypes: ['Flying']};
+    const active = describeMoveOption({...base, speedControl: {...emptySpeedControl, our_tailwind: {started_turn: 2, turns_left: 3}}});
+    expect(active).toContain('Tailwind is already active on your side with 3 more turns including this one');
+    expect(active).toMatch(/will fail/);
+    expect(active).not.toMatch(/lasts 4 turns/);
+    const idle = describeMoveOption({...base, speedControl: emptySpeedControl});
+    expect(idle).toMatch(/lasts 4 turns/);
+  });
+  it('未传 speedControl 时注解保持旧行为', () => {
+    const tr = describeMoveOption({
+      dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5,
+      attackerTypes: ['Ghost', 'Fire'], fieldConditions: ['move: Trick Room'],
+    });
+    expect(tr).toMatch(/already active/);
+    expect(tr).not.toMatch(/more turns including this one/);
+    const tailwind = describeMoveOption({dex, moveId: 'tailwind', moveName: 'Tailwind', pp: 15, maxpp: 15, attackerTypes: ['Flying']});
+    expect(tailwind).not.toMatch(/lasts 4 turns/);
   });
 });
