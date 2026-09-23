@@ -1,5 +1,6 @@
 import type {AppConfig} from '../config.js';
 import type {DexData} from '../dex/index.js';
+import type {AdvisorClient} from '../jev/advisor.js';
 import type {JevClient} from '../jev/client.js';
 import type {Logger} from '../log/logger.js';
 import {parseLine} from '../state/protocol.js';
@@ -7,12 +8,18 @@ import {BattleRoom} from './battle-room.js';
 import type {PsConnection, PsMessage} from './connection.js';
 import {buildTrnCommand, getAssertion} from './login.js';
 
+/** 主站对局页 URL（实时观战/赛后回放入口） */
+function battleUrl(battleId: string): string {
+  return `https://play.pokemonshowdown.com/${battleId}`;
+}
+
 export interface PsSessionOptions {
   conn: PsConnection;
   cfg: AppConfig;
   logger: Logger;
   dex: DexData;
   jev: JevClient | null;
+  advisor?: AdvisorClient | null;
   packedTeam: string;
   /** 队伍被拒绝时的剥离 -Mega 重打包版本（spec 不确定项 1） */
   packedTeamFallback?: string;
@@ -58,6 +65,11 @@ export class PsSession {
     });
   }
 
+  /** 取消所有房间的当前决策；不禁用后续重连消息。 */
+  dispose(): void {
+    for (const room of this.rooms.values()) room.cancelPendingDecision();
+  }
+
   handleMessage(msg: PsMessage): void {
     if (msg.roomId) {
       if (msg.roomId.startsWith('battle-')) {
@@ -77,12 +89,15 @@ export class PsSession {
         ourName: this.username,
         dex: this.opts.dex,
         jev: this.opts.jev,
+        advisor: this.opts.advisor,
         logger: this.opts.logger,
         conn: this.opts.conn,
         cfg: this.opts.cfg,
       });
       this.rooms.set(battleId, room);
-      this.opts.logger.info(`进入战斗房间: ${battleId}`);
+      this.opts.logger.info(`进入战斗房间: ${battleId}（${battleUrl(battleId)}）`);
+      // 每场对局默认请求开启计时器（用户约定：超时自动判负而非无限等待）
+      this.opts.conn.send(battleId, '/timer on');
       for (const resolve of this.battleResolvers.splice(0)) resolve(room);
     }
     return room;

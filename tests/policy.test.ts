@@ -1,4 +1,5 @@
-import {describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
+import type {AdvisorClient} from '../src/jev/advisor.js';
 import {decideChoice, type DecisionContext} from '../src/decide/policy.js';
 import type {DecideInput, JevClient} from '../src/jev/client.js';
 import type {Answer} from '../src/jev/types.js';
@@ -39,6 +40,142 @@ function mkCtx(opts: {
     cfg: {jevMock: opts.jevMock ?? false, sendRqid: true},
   };
 }
+
+describe('三级上下文与辅助分析接线', () => {
+  afterEach(() => vi.useRealTimers());
+  const advice = {text: 'RECOMMEND: consider the sand pair against this preview.', model: 'test/advisor', latencyMs: 12, usage: {cost: 0.004, input_tokens: 300, output_tokens: 30}};
+
+  it.each(['team-preview', 'turn', 'force-switch'] as const)('%s 将完整状态与合法选项送给 advisor，再交给 jev', async kind => {
+    const request = mkRequest();
+    if (kind === 'team-preview') { request.teamPreview = true; request.active = undefined; }
+    if (kind === 'force-switch') { request.forceSwitch = [true, false]; request.active = undefined; }
+    const analyze = vi.fn<AdvisorClient['analyze']>(async input => {
+      expect(input.kind).toBe(kind);
+      expect(Object.keys(input.questions).length).toBeGreaterThan(0);
+      const state = input.state as any;
+      expect(state.sides.ours.preview[0].moves.length).toBeGreaterThan(0);
+      expect(state.sides.ours.preview[0].stats).toBeDefined();
+      expect(state.sides.ours.team_notes.length).toBeGreaterThan(0);
+      expect(state.advisor_analysis).toBeUndefined();
+      return advice;
+    });
+    const entries: any[] = [];
+    const onUsage = vi.fn();
+    const ctx = mkCtx({request, logger: {...nullLogger, decision: (_id, e) => entries.push(e)}, jev: mkJev(input => {
+      expect(analyze).toHaveBeenCalledTimes(1);
+      expect((input.state as any).advisor_analysis.text).toBe(advice.text);
+      expect(Object.values(input.questions).every(q => q.instructions.includes('Coach analysis:'))).toBe(true);
+      return {};
+    })});
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze};
+    ctx.onUsage = onUsage;
+    const result = await decideChoice(ctx);
+    expect(result?.advisorUsage?.cost).toBe(0.004);
+    expect(result?.advisorLatencyMs).toBe(12);
+    expect(onUsage.mock.calls.map(c => c[1])).toEqual(['advisor', 'jev']);
+    expect(entries[0].advisor_usage.cost).toBe(0.004);
+    expect(entries[0].total_latency_ms).toBeGreaterThanOrEqual(0);
+  });
+
+  it.each([1, 2] as const)('L%s 不调用 advisor，仍有基础分析', async level => {
+    const analyze = vi.fn();
+    let captured: any;
+    const ctx = mkCtx({jev: mkJev(input => { captured = input.state; return {}; })});
+    ctx.cfg.jevContextLevel = level;
+    ctx.advisor = {analyze};
+    await decideChoice(ctx);
+    expect(captured.sides.ours.preview[0].speed).toBeDefined();
+    expect(captured.sides.ours.team_notes !== undefined).toBe(level === 2);
+    expect(captured.advisor_analysis).toBeUndefined();
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it('mock 模式下 L3 也不调用任何模型', async () => {
+    const ctx = mkCtx({jevMock: true});
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze: vi.fn()};
+    await decideChoice(ctx);
+    expect(ctx.advisor.analyze).not.toHaveBeenCalled();
+  });
+
+  it.each(['null', 'throw', 'timeout'])('advisor %s 后按 L2 继续，jev 仍可成功', async mode => {
+    vi.useFakeTimers();
+    const decide = vi.fn<JevClient['decide']>(async () => ({answers: {action_slot_1: {type: 'choice', choice: 'move_1_foe_a'}}, usage: {}, latencyMs: 1, raw: {}}));
+    const ctx = mkCtx({jev: {decide}});
+    ctx.cfg = {...ctx.cfg, jevContextLevel: 3, jevAdvisorTimeoutMs: 10};
+    ctx.advisor = {analyze: async () => {
+      if (mode === 'throw') throw new Error('offline');
+      if (mode === 'timeout') return new Promise(() => {});
+      return null;
+    }};
+    const pending = decideChoice(ctx);
+    await vi.advanceTimersByTimeAsync(11);
+    expect((await pending)?.fallback).toBe(false);
+    expect(decide).toHaveBeenCalledOnce();
+    expect((decide.mock.calls[0][0].state as any).advisor_analysis).toBeUndefined();
+  });
+
+  it('advisor 无分析文本仍计费，但不向 jev 注入空建议', async () => {
+    let captured: any;
+    const ctx = mkCtx({jev: mkJev(input => { captured = input; return {}; })});
+    const onUsage = vi.fn();
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze: async () => ({...advice, text: ''})};
+    ctx.onUsage = onUsage;
+    const result = await decideChoice(ctx);
+    expect(result?.advisorUsage?.cost).toBe(0.004);
+    expect(captured.state.advisor_analysis).toBeUndefined();
+    expect(Object.values(captured.questions).every((q: any) => !q.instructions.includes('Coach analysis:'))).toBe(true);
+    expect(onUsage.mock.calls.map(c => c[1])).toEqual(['advisor', 'jev']);
+  });
+
+  it('advisor 等待期间 tracker 变化不改变传给两个模型的快照', async () => {
+    let captured: any;
+    const ctx = mkCtx({jev: mkJev(input => { captured = input.state; return {}; })});
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze: async () => {
+      ctx.tracker.state.fieldConditions.push('move: Trick Room');
+      return advice;
+    }};
+    await decideChoice(ctx);
+    expect(captured.field).not.toContain('move: Trick Room');
+    expect(ctx.tracker.state.fieldConditions).toContain('move: Trick Room');
+  });
+
+  it('jev 失败仍保留已完成的 advisor 费用和日志', async () => {
+    const ctx = mkCtx({jev: mkThrowingJev()});
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze: async () => advice};
+    const result = await decideChoice(ctx);
+    expect(result?.fallback).toBe(true);
+    expect(result?.advisorUsage?.cost).toBe(0.004);
+  });
+
+  it('不服从取消信号的客户端也受决策总预算约束', async () => {
+    vi.useFakeTimers();
+    const ctx = mkCtx({jev: {decide: () => new Promise(() => {})}});
+    ctx.cfg.jevDecisionBudgetMs = 30;
+    const pending = decideChoice(ctx);
+    await vi.advanceTimersByTimeAsync(31);
+    expect((await pending)?.fallback).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('取消旧请求不记录决策、不执行本地兜底', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const decision = vi.fn();
+    const ctx = mkCtx({jev: {decide: () => new Promise(() => {})}, logger: {...nullLogger, decision}});
+    ctx.control = {signal: controller.signal};
+    const pending = decideChoice(ctx);
+    await vi.advanceTimersByTimeAsync(1);
+    controller.abort();
+    expect(await pending).toBeNull();
+    expect(decision).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
 
 describe('decideChoice - turn', () => {
   it('应用 jev 答案生成指令', async () => {

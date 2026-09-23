@@ -310,7 +310,6 @@ export class BattleTracker {
         if (p && a1 && !['none', 'hidden'].includes(a1)) p.ability = a1;
         break;
       }
-      case '-activate':
       case '-start': {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
@@ -320,6 +319,10 @@ export class BattleTracker {
         }
         break;
       }
+      // -activate 是瞬发事件的回放（Protect 挡招、道具/特性触发），不代表持续状态：
+      // 持久状态由 -start 记录、-end 移除；单回合效果由 -singleturn 记录、回合切换清空。
+      case '-activate':
+        break;
       case '-end': {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);

@@ -1,4 +1,7 @@
 import type {JevClient} from '../jev/client.js';
+import type {AdvisorClient} from '../jev/advisor.js';
+import {withDeadline, CallCancelledError, DeadlineExceededError, type CallControl} from '../jev/deadline.js';
+import {buildAnalysisContext} from '../state/analysis.js';
 import type {Answer, DecisionsUsage, Question} from '../jev/types.js';
 import type {Logger} from '../log/logger.js';
 import {buildChooseCommand, validateActions, type ChooseAction} from '../ps/choose.js';
@@ -16,6 +19,9 @@ export type DecisionKind = 'team-preview' | 'turn' | 'force-switch' | 'none';
 export interface PolicyConfig {
   jevMock: boolean;
   sendRqid: boolean;
+  jevContextLevel?: 1 | 2 | 3;
+  jevDecisionBudgetMs?: number;
+  jevAdvisorTimeoutMs?: number;
 }
 
 export interface DecisionContext extends FallbackContext {
@@ -23,6 +29,10 @@ export interface DecisionContext extends FallbackContext {
   logger: Logger;
   battleId: string;
   cfg: PolicyConfig;
+  advisor?: AdvisorClient | null;
+  control?: CallControl;
+  /** 每个已完成 API 调用立即记账，即使随后请求被取消也保留已知费用。 */
+  onUsage?: (usage: DecisionsUsage, source: 'jev' | 'advisor') => void;
 }
 
 export interface DecisionOutcome {
@@ -34,6 +44,9 @@ export interface DecisionOutcome {
   answers?: Record<string, Answer>;
   usage?: DecisionsUsage;
   latencyMs?: number;
+  advisorUsage?: DecisionsUsage;
+  advisorLatencyMs?: number;
+  totalLatencyMs?: number;
 }
 
 export function decideKind(request: BattleRequest): DecisionKind {
@@ -60,6 +73,10 @@ interface DecisionRun {
   latencyMs: number;
   state: unknown;
   questions: Record<string, Question>;
+  advisorUsage?: DecisionsUsage;
+  advisorLatencyMs?: number;
+  advisorStatus?: 'success' | 'unavailable' | 'failed';
+  totalLatencyMs?: number;
 }
 
 function previewOpponentSpecies(state: BattleState): string[] {
@@ -161,18 +178,62 @@ async function runWithJev(
   ctx: DecisionContext,
   kind: Exclude<DecisionKind, 'none'>,
   jev: JevClient,
+  trace: DecisionRun,
 ): Promise<DecisionRun> {
-  const state = buildStatePayload({state: ctx.tracker.state, request: ctx.request, dex: ctx.dex});
+  const level = ctx.cfg.jevContextLevel ?? 2;
+  const analysis = buildAnalysisContext({dex: ctx.dex, state: ctx.tracker.state, request: ctx.request, level});
+  const state = structuredClone(buildStatePayload({state: ctx.tracker.state, request: ctx.request, dex: ctx.dex, analysis}));
+  // 在第一次 await 之前固定本次请求的状态和合法选项；advisor 与 jev 使用同一份快照。
+  const plans = kind === 'team-preview' ? [] : kind === 'turn' ? buildTurnPlans({...ctx, analysis}) : buildSwitchPlans({...ctx, analysis});
+  let questions: Record<string, Question> = kind === 'team-preview' ? buildPreviewQuestions({
+    dex: ctx.dex, request: ctx.request, analysis,
+    opponentPreviewSpecies: previewOpponentSpecies(ctx.tracker.state),
+  }).questions : Object.fromEntries(plans.map(plan => [plan.questionName, plan.question]));
+  if (!Object.keys(questions).length) throw new Error(`没有可提交给 jev 的 ${kind} 问题`);
+  trace.state = state;
+  trace.questions = questions;
+  if (level === 3) {
+    trace.advisorStatus = 'unavailable';
+    if (ctx.advisor) {
+      const deadlineAt = Math.min(ctx.control?.deadlineAt ?? Infinity, Date.now() + (ctx.cfg.jevAdvisorTimeoutMs ?? 10000));
+      try {
+        const advice = await withDeadline(signal => ctx.advisor!.analyze({kind, state, questions}, {signal, deadlineAt}), {
+          signal: ctx.control?.signal, deadlineAt,
+        });
+        ctx.control?.signal?.throwIfAborted();
+        if (advice) {
+          trace.advisorUsage = advice.usage;
+          trace.advisorLatencyMs = advice.latencyMs;
+          ctx.onUsage?.(advice.usage, 'advisor');
+          const text = advice.text.trim();
+          trace.advisorStatus = text ? 'success' : 'failed';
+          if (text) {
+            state.advisor_analysis = {text, model: advice.model, latency_ms: advice.latencyMs};
+            questions = Object.fromEntries(Object.entries(questions).map(([name, question]) => [name, {
+              ...question, instructions: `Coach analysis: ${text}\nWeigh this advice against the snapshot and legal options; the final choice is yours.\n${question.instructions}`,
+            }]));
+            trace.questions = questions;
+          }
+        } else trace.advisorStatus = 'failed';
+      } catch {
+        ctx.control?.signal?.throwIfAborted();
+        trace.advisorStatus = 'failed';
+      }
+    }
+    if (trace.advisorStatus !== 'success') ctx.logger.warn('advisor 不可用或超时，本次按 L2 上下文继续');
+  }
+  ctx.control?.signal?.throwIfAborted();
+  const res = await jev.decide({sessionId: ctx.battleId, state, questions}, ctx.control);
+  ctx.control?.signal?.throwIfAborted();
+  trace.usage = res.usage;
+  trace.latencyMs = res.latencyMs;
+  trace.answers = res.answers;
+  ctx.onUsage?.(res.usage, 'jev');
   if (kind === 'team-preview') {
-    const {questions} = buildPreviewQuestions({
-      dex: ctx.dex,
-      request: ctx.request,
-      opponentPreviewSpecies: previewOpponentSpecies(ctx.tracker.state),
-    });
-    const res = await jev.decide({sessionId: ctx.battleId, state, questions});
     const {order, adjusted} = resolvePreviewOrder(res.answers);
     const missingCount = adjusted.filter(a => a.startsWith('missing:')).length;
     return {
+      ...trace,
       actions: [{kind: 'team', order: fullTeamOrder(order)}],
       adjusted,
       replacedCount: order.length - missingCount,
@@ -183,11 +244,6 @@ async function runWithJev(
       questions,
     };
   }
-  const plans = kind === 'turn' ? buildTurnPlans(ctx) : buildSwitchPlans(ctx);
-  if (plans.length === 0) throw new Error(`没有可提交给 jev 的 ${kind} 问题`);
-  const questions: Record<string, Question> = {};
-  for (const plan of plans) questions[plan.questionName] = plan.question;
-  const res = await jev.decide({sessionId: ctx.battleId, state, questions});
   const picks: SlotPick[] = [];
   const adjusted: string[] = [];
   for (const plan of plans) {
@@ -205,6 +261,7 @@ async function runWithJev(
   const deduped = dedupeSwitchTargets(merged.actions, plans, res.answers, adjusted);
   const actions = degradeMegaConflicts(deduped, picks, adjusted);
   return {
+    ...trace,
     actions,
     adjusted,
     replacedCount: merged.replacedCount,
@@ -247,6 +304,11 @@ function finish(
     fallback,
     latency_ms: run.latencyMs,
     usage: run.usage,
+    advisor_usage: run.advisorUsage,
+    advisor_latency_ms: run.advisorLatencyMs,
+    advisor_status: run.advisorStatus,
+    total_latency_ms: run.totalLatencyMs,
+    context_level: ctx.cfg.jevContextLevel ?? 2,
     answers: run.answers,
     questions: run.questions,
     state: run.state,
@@ -260,6 +322,9 @@ function finish(
     answers: run.answers,
     usage: run.usage,
     latencyMs: run.latencyMs,
+    advisorUsage: run.advisorUsage,
+    advisorLatencyMs: run.advisorLatencyMs,
+    totalLatencyMs: run.totalLatencyMs,
   };
 }
 
@@ -268,7 +333,7 @@ function finish(
  * jev 无任何可用答案 → 本地兜底；否则 jev 答案与本地兜底按槽位合并。
  */
 export async function decideChoice(ctx: DecisionContext): Promise<DecisionOutcome | null> {
-  if (ctx.request.wait || ctx.tracker.state.ended) return null;
+  if (ctx.request.wait || ctx.tracker.state.ended || ctx.control?.signal?.aborted) return null;
   const kind = decideKind(ctx.request);
   if (kind === 'none') return null;
   const jev = ctx.jev;
@@ -276,13 +341,24 @@ export async function decideChoice(ctx: DecisionContext): Promise<DecisionOutcom
     const note = ctx.cfg.jevMock ? 'JEV_MOCK=1' : 'no jev client configured';
     return finish(ctx, kind, localRun(ctx, note), true);
   }
+  const started = Date.now();
+  const deadlineAt = Math.min(ctx.control?.deadlineAt ?? Infinity, started + (ctx.cfg.jevDecisionBudgetMs ?? 35000));
+  const trace = localRun(ctx, 'jev error');
   let run: DecisionRun;
   try {
-    run = await runWithJev(ctx, kind, jev);
+    run = await withDeadline(signal => runWithJev({...ctx, control: {signal, deadlineAt}}, kind, jev, trace), {
+      signal: ctx.control?.signal, deadlineAt,
+    });
   } catch (err) {
-    ctx.logger.warn(`jev 决策失败，改用本地兜底: ${err instanceof Error ? err.message : String(err)}`);
-    return finish(ctx, kind, localRun(ctx, 'jev error'), true);
+    // 取消代表请求已经失效；超时仍应为当前请求及时提供本地动作。
+    if (ctx.control?.signal?.aborted || ctx.tracker.state.ended || err instanceof CallCancelledError) return null;
+    ctx.logger.warn(err instanceof DeadlineExceededError ? '决策总预算耗尽，改用本地兜底' : 'jev 决策失败，改用本地兜底');
+    trace.totalLatencyMs = Date.now() - started;
+    trace.actions = fallbackActions(ctx);
+    return finish(ctx, kind, trace, true);
   }
+  if (ctx.control?.signal?.aborted || ctx.tracker.state.ended) return null;
+  run.totalLatencyMs = Date.now() - started;
   if (run.replacedCount === 0) {
     return finish(ctx, kind, {...run, actions: fallbackActions(ctx), adjusted: [...run.adjusted, 'no usable jev answer']}, true);
   }

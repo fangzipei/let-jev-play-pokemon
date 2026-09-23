@@ -1,10 +1,116 @@
 import {describe, expect, it} from 'vitest';
 import {
-  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, opponentActives,
+  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, opponentActives, isMegaCapable,
 } from '../src/state/serialize.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
+import {buildAnalysisContext} from '../src/state/analysis.js';
 
 const dex = mkDex();
+
+describe('增强 payload 与渲染', () => {
+  it('Mega 候选别名按基础形态和道具识别，缺形态不伪造', () => {
+    const p = mkRequest().side.pokemon[3];
+    p.details = 'Salamence-Mega, L50';
+    expect(isMegaCapable(dex, p)).toBe(true);
+    p.item = 'golisopite';
+    expect(isMegaCapable(dex, p)).toBe(false);
+    p.item = 'salamencite';
+    expect(isMegaCapable({...dex, species: {}}, p)).toBe(false);
+  });
+  it('我方场上、替补、preview 均保留完整配置与当前招式请求', () => {
+    const request = mkRequest();
+    request.side.pokemon[0].baseAbility = 'Emergency Exit';
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex, request, state, level: 2});
+    const payload = buildStatePayload({dex, request, state, analysis}) as any;
+    const ours = payload.sides.ours;
+    expect(ours.active[0]).toMatchObject({slot: 1, ident: request.side.pokemon[0].ident, moves: request.side.pokemon[0].moves, stats: request.side.pokemon[0].stats, base_ability: 'Emergency Exit'});
+    expect(ours.active[0].move_request).toEqual(request.active![0].moves);
+    expect(ours.bench[0]).toMatchObject({moves: request.side.pokemon[2].moves, ability: 'sandstream', item: 'choicescarf', stats: request.side.pokemon[2].stats});
+    expect(ours.preview).toHaveLength(4);
+    expect(ours.preview[2]).toMatchObject({slot: 3, speed: 123});
+    expect(ours.team_notes).toHaveLength(4);
+    expect(payload.analysis_notes).toMatch(/not a calibrated actual HP%/);
+  });
+  it('已揭示敌方道具、特性、状态、替补不能消失，未知特性不从 dex 填入', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-item|p2a: Victreebel|Choice Scarf');
+    tracker.handleLine('|-ability|p2a: Victreebel|Chlorophyll');
+    tracker.handleLine('|-start|p2a: Victreebel|Substitute');
+    tracker.handleLine('|-singleturn|p2a: Victreebel|Protect');
+    tracker.handleLine('|switch|p2b: Kingambit|Kingambit, L50|100/100');
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 1});
+    const payload = buildStatePayload({dex, request, state: tracker.state, analysis}) as any;
+    const opponent = payload.sides.opponent;
+    expect(opponent.active[0]).toMatchObject({ident: 'p2: Victreebel', item_revealed: 'Choice Scarf', ability_revealed: 'Chlorophyll', volatiles: ['Substitute'], single_turn: ['Protect'], base_speed: 70, speed: null});
+    expect(opponent.active[1].ability_revealed).toBeNull();
+    expect(opponent.bench.map((p: any) => p.species)).toContain('Charizard');
+    expect(opponent.preview).toHaveLength(6);
+    expect(payload.sides.ours).not.toHaveProperty('team_notes');
+    expect(JSON.stringify(payload)).not.toContain('outspeeds');
+  });
+  it('满血且没亮招的退场对手仍是已见替补，不混入未上场列表', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|switch|p2a: Kingambit|Kingambit, L50|100/100');
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.sides.opponent.bench.map((p: any) => p.species)).toContain('Victreebel');
+    expect(payload.sides.opponent.unseen_from_preview.map((p: any) => p.species)).not.toContain('Victreebel');
+    expect(payload.sides.opponent.seen_count).toBe(3);
+  });
+  it('payload 和换人描述复用传入 incoming，不再次粗估', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    state.sides.p2.pokemon[0].revealedMoves = ['Sludge Bomb'];
+    const analysis = buildAnalysisContext({dex, request, state, level: 1});
+    analysis.threats[2].incoming[0].roughPercent = 73;
+    const payload = buildStatePayload({dex, request, state, analysis}) as any;
+    expect(payload.sides.opponent.active[0].incoming_estimates.find((m: any) => m.slot === 3).rough_percent).toBe(73);
+    const text = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: opponentActives(dex, state), analysis, teamSlot: 3});
+    expect(text).toContain('incoming ≈73%');
+    expect(text).toMatch(/revealed moves/);
+    expect(text).toMatch(/not a calibrated actual HP%/);
+  });
+  it('preview 展示速度和双向潜在克制，L1 不添加角色', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex, request, state, level: 1});
+    const text = describePreviewCandidate({dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: ['Charizard'], megaCapable: true, analysis, teamSlot: 1});
+    expect(text).toContain('estimated speed 60');
+    expect(text).toMatch(/potential STAB.*Charizard.*4x/);
+    expect(text).toContain('not revealed moves');
+    expect(text).not.toContain('role:');
+  });
+  it('未知属性/招式不描述成无弱点或状态招式', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    const missing = {...dex, typechart: {}};
+    const analysis = buildAnalysisContext({dex: missing, request, state, level: 1});
+    const text = describePreviewCandidate({dex: missing, pokemon: request.side.pokemon[0], opponentPreviewSpecies: ['Charizard'], megaCapable: false, analysis, teamSlot: 1});
+    expect(text).toMatch(/unknown/i);
+    expect(text).not.toMatch(/no STAB weakness|no potential STAB weakness/);
+    const move = describeMoveOption({dex, moveId: 'unknownmove', moveName: 'Unknown Move', pp: 1, maxpp: 1, attackerTypes: []});
+    expect(move).toMatch(/unknown/i);
+    expect(move).not.toContain('status move');
+  });
+  it('传 analysis 的动作描述附速度但从不据种族速度承诺先手', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex, request, state, level: 2});
+    const text = describeMoveOption({dex, moveId: 'suckerpunch', moveName: 'Sucker Punch', pp: 5, maxpp: 5, attackerTypes: ['Bug', 'Steel'], target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'}, analysis, attackerSlot: 1});
+    expect(text).toContain('estimated speed 60');
+    expect(text).toContain('base speed 70');
+    expect(text).toContain('actual speed unknown');
+    expect(text).toMatch(/priority.*before speed/);
+    expect(text).not.toMatch(/you move first|outspeeds/);
+    expect(text).toContain('not a calibrated actual HP%');
+  });
+  it('无 analysis 保持旧调用兼容，不悄悄启用等级或速度字段', () => {
+    const payload = buildStatePayload({dex, request: mkRequest(), state: mkTracker().state}) as any;
+    expect(payload.sides.ours.active[0]).not.toHaveProperty('speed');
+    expect(payload.sides.ours).not.toHaveProperty('team_notes');
+  });
+});
 
 describe('buildStatePayload', () => {
   it('包含双方关键信息', () => {

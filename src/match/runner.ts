@@ -1,5 +1,6 @@
 import {loadConfig, type AppConfig} from '../config.js';
 import {loadDex, type DexData} from '../dex/index.js';
+import {createAdvisorClient} from '../jev/advisor.js';
 import {createJevClient, type JevClient} from '../jev/client.js';
 import {createLogger, type Logger} from '../log/logger.js';
 import type {BattleRoom, BattleSummary} from '../ps/battle-room.js';
@@ -37,7 +38,7 @@ export function summarizeBattles(summaries: BattleSummary[]): RunResult {
   };
 }
 
-function mkJevClient(cfg: AppConfig, logger: Logger): JevClient | null {
+function mkJevClient(cfg: AppConfig, logger: Logger, fetchImpl?: typeof fetch): JevClient | null {
   if (cfg.jevMock) {
     logger.info('JEV_MOCK=1：跳过 Decisions API，全部使用本地启发式');
     return null;
@@ -48,6 +49,7 @@ function mkJevClient(cfg: AppConfig, logger: Logger): JevClient | null {
     transport: cfg.jevTransport,
     timeoutMs: cfg.jevTimeoutMs,
     retry: cfg.jevRetry,
+    fetchImpl,
     logger,
   });
 }
@@ -76,7 +78,18 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
   const cfg = opts.cfg ?? loadConfig();
   const logger = opts.logger ?? createLogger({logDir: cfg.logDir, logLevel: cfg.logLevel});
   const dex = opts.dex ?? (await loadDex({fetchImpl: opts.fetchImpl}));
-  const jev = mkJevClient(cfg, logger);
+  const jev = mkJevClient(cfg, logger, opts.fetchImpl);
+  const advisor = !cfg.jevMock && cfg.jevContextLevel === 3 && cfg.jevAdvisorApiKey.trim()
+    ? createAdvisorClient({
+      apiKey: cfg.jevAdvisorApiKey,
+      model: cfg.jevAdvisorModel,
+      timeoutMs: cfg.jevAdvisorTimeoutMs,
+      maxTokens: cfg.jevAdvisorMaxTokens,
+      reasoningEffort: cfg.jevAdvisorReasoning,
+      fetchImpl: opts.fetchImpl,
+      logger,
+    })
+    : null;
   const paste = opts.paste ?? loadTeamPaste(cfg.teamFile);
   const team = packTeam(paste);
   const teamFallback = packTeam(stripMegaSuffix(paste));
@@ -90,6 +103,7 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
     logger,
     dex,
     jev,
+    advisor,
     packedTeam: team.packed,
     packedTeamFallback: teamFallback.packed,
     fetchImpl: opts.fetchImpl,
@@ -99,7 +113,10 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
   });
   conn.onMessage(msg => session.handleMessage(msg));
   conn.onReconnect(() => logger.warn('已重连；等待服务器重新发送 challstr 并重新登录'));
-  conn.onClose(() => logger.warn('与 PS 的连接已关闭'));
+  conn.onClose(() => {
+    session.dispose();
+    logger.warn('与 PS 的连接已关闭');
+  });
 
   const summaries: BattleSummary[] = [];
   try {
@@ -128,6 +145,7 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
     }
     throw err;
   } finally {
+    session.dispose();
     conn.close();
     logger.close();
   }

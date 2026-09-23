@@ -1,5 +1,6 @@
 import {speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
+import type {AnalysisContext} from '../state/analysis.js';
 import {toId} from '../state/protocol.js';
 import {
   activeEntries, benchEntries, isFainted, speciesOf, teamSlotOf,
@@ -47,18 +48,20 @@ const TURN_INTRO =
   'Only one Pokemon on your whole team may Mega Evolve per battle, and declaring it happens while using the move.';
 
 /** 从 dex 里找 species 的 Mega 形态名（用于 mega 选项的描述文本） */
-export function megaNameOf(dex: DexData, species: string): string {
-  const base = toId(species);
+export function megaNameOf(dex: DexData, species: string, item?: string): string {
+  const base = toId(dex.species[toId(species)]?.baseSpecies ?? species);
   for (const info of Object.values(dex.species)) {
-    if (info.requiredItem && toId(info.baseSpecies ?? '') === base) return info.name;
+    if (info.requiredItem && toId(info.baseSpecies ?? '') === base &&
+        (item === undefined || toId(info.requiredItem) === toId(item))) return info.name;
   }
-  return `${species}-Mega`;
+  return 'unknown Mega form';
 }
 
 interface TurnInput {
   dex: DexData;
   request: BattleRequest;
   tracker: BattleTracker;
+  analysis?: AnalysisContext;
 }
 
 interface TargetSpec {
@@ -118,7 +121,9 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         maxpp: mv.maxpp,
         attackerTypes: types,
         attackerStats: me.stats,
-        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent} : undefined,
+        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident} : undefined,
+        analysis: input.analysis,
+        attackerSlot: teamSlotOf(request, me),
         hitsBoth,
         weather,
       });
@@ -128,7 +133,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
       if (canMega) {
         options.push({
           key: `${key}_mega`,
-          label: `${label} — MEGA EVOLVE ${species} into ${megaNameOf(dex, species)} with this move (your team's only Mega; stats and ability change immediately)`,
+          label: `${label} — MEGA EVOLVE ${species} into ${megaNameOf(dex, species, me.item)} with this move (your team's only Mega; stats and ability change immediately)`,
           action: {...action, mega: true},
         });
       }
@@ -140,7 +145,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
       const teamIndex = teamSlotOf(request, bench);
       options.push({
         key: `switch_${teamIndex}`,
-        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes}),
+        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex}),
         action: {kind: 'switch', slot, teamIndex},
       });
     }

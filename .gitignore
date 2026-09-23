@@ -3,4 +3,5 @@ node_modules/
 logs/
 .cache/
 *.log
-!tests/fixtures/*.log
+docs/
+team*.txt

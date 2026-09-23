@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {effectiveness, estimateDamagePercent, normalizeTypechart, speedNote} from '../src/state/calc.js';
+import {effectiveness, estimateDamagePercent, normalizeTypechart, speedNote, typechartFromDamageTaken} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -11,6 +11,27 @@ describe('normalizeTypechart', () => {
     const chart = normalizeTypechart({grass: {fire: 2}, water: {fire: 0.5}});
     expect(chart.fire.grass).toBe(2);
     expect(chart.fire.water).toBe(0.5);
+  });
+});
+
+describe('官方属性编码', () => {
+  const raw = {
+    grass: {damageTaken: {Normal: 0, Fire: 1, Water: 2, psn: 3, sandstorm: 3}},
+    ghost: {damageTaken: {Normal: 3}},
+    flying: {damageTaken: {Ground: 3}},
+    sandstorm: {damageTaken: {Fire: 1}},
+  };
+  it('0/1/2/3 转为 1/2/0.5/0，忽略状态和天气', () => {
+    const chart = typechartFromDamageTaken(Object.entries(raw).map(([name, row]) => ({name, ...row})));
+    expect(chart).toEqual({normal: {grass: 1, ghost: 0}, fire: {grass: 2}, water: {grass: 0.5}, ground: {flying: 0}});
+  });
+  it('线上嵌套 damageTaken 与本地 Type 数据使用相同转换', () => {
+    expect(normalizeTypechart(raw)).toEqual({normal: {grass: 1, ghost: 0}, fire: {grass: 2}, water: {grass: 0.5}, ground: {flying: 0}});
+  });
+  it('粗估缺属性表时返回 unknown 而非中性伤害', () => {
+    const dex = mkDex();
+    dex.typechart = {};
+    expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Charizard'})).toBeNull();
   });
 });
 
@@ -56,6 +77,8 @@ describe('speedNote', () => {
   it('描述速度对比', () => {
     const note = speedNote(mkDex(), 'Chandelure', 100, 'Kingambit');
     expect(note).toContain('100');
-    expect(note).toMatch(/first|second/);
+    expect(note).toContain('base speed 50');
+    expect(note).toContain('actual speed unknown');
+    expect(note).not.toMatch(/you move first|you move second|outspeeds/i);
   });
 });

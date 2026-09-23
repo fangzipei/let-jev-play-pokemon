@@ -1,6 +1,7 @@
 import type {DexData} from '../dex/index.js';
 import type {Answer, Question} from '../jev/types.js';
 import type {BattleRequest} from '../state/request.js';
+import type {AnalysisContext} from '../state/analysis.js';
 import {describePreviewCandidate, isMegaCapable} from '../state/serialize.js';
 import {resolveKey} from './answers.js';
 
@@ -14,12 +15,16 @@ export interface PreviewQuestionSet {
 const INTRO =
   'You are choosing which 4 of your 6 Pokemon to bring to a doubles (VGC-style) battle, and in which order. ' +
   'The first two brought Pokemon are your leads (they start on the field). ' +
-  'Species/item clauses are active; Mega Evolution is limited to one Pokemon per battle.';
+  'Species/item clauses are active; Mega Evolution is limited to one Pokemon per battle. ' +
+  'These four choices are independent questions in the same batch; answers to other questions are not available. ' +
+  'Plan one coherent team of four distinct slots: two complementary leads and two reserves supporting the same win condition. ' +
+  'Use each question role to express that combination; duplicates will be resolved after the batch.';
 
 export function buildPreviewQuestions(input: {
   dex: DexData;
   request: BattleRequest;
   opponentPreviewSpecies: string[];
+  analysis?: AnalysisContext;
 }): PreviewQuestionSet {
   const descriptionByKey: Record<string, string> = {};
   input.request.side.pokemon.forEach((pokemon, index) => {
@@ -28,14 +33,24 @@ export function buildPreviewQuestions(input: {
       pokemon,
       opponentPreviewSpecies: input.opponentPreviewSpecies,
       megaCapable: isMegaCapable(input.dex, pokemon),
+      analysis: input.analysis,
+      teamSlot: index + 1,
     });
   });
 
+  const megaHolders = input.request.side.pokemon.filter(p => isMegaCapable(input.dex, p)).length;
+  const megaAdvice = megaHolders >= 2
+    ? ` Your team has ${megaHolders} Mega-capable Pokemon; only one can Mega Evolve per battle, so bring exactly one of them and use the other slot for a different answer - a second Mega-capable Pokemon wastes a slot.`
+    : megaHolders === 1
+      ? ' Your team has one Mega-capable Pokemon; include it in your four so you keep the option to Mega Evolve.'
+      : '';
+  const intro = INTRO + (input.analysis && input.analysis.level >= 2
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + megaAdvice : '');
   const instructions: Record<string, string> = {
-    lead_1: `${INTRO} Pick your FIRST lead: the Pokemon that should start the battle given the opponent's 6 revealed Pokemon.`,
-    lead_2: `${INTRO} Pick your SECOND lead: it must be the best partner for your already-chosen first lead, do NOT reuse a slot that was already picked.`,
-    bring_3: `${INTRO} Pick the THIRD Pokemon to bring (first reserve): the best remaining answer to the opponent's threats, do NOT reuse an already-picked slot.`,
-    bring_4: `${INTRO} Pick the FOURTH Pokemon to bring (second reserve): the best remaining coverage, do NOT reuse an already-picked slot.`,
+    lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
+    lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,
+    bring_3: `${intro} Pick the THIRD Pokemon (first reserve): the main backup answer to threats that pressure your intended leads.`,
+    bring_4: `${intro} Pick the FOURTH Pokemon (second reserve): complementary coverage and an endgame plan for that intended four-Pokemon combination.`,
   };
 
   const questions: Record<string, Question> = {};
