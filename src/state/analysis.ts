@@ -241,6 +241,34 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (ability === 'competitive') {
     notes.push('Competitive raises Special Attack by 2 stages when an opponent lowers any of its stats; stat-lowering moves against it can backfire');
   }
+  // Reg M-C 高频战术条件注解：全部由当前 request 的招式/道具/特性/队友条件真实驱动，无条件不生成
+  const hasPriorityMove = (pokemon.moves ?? []).some(id => (input.dex.moves[toId(id)]?.priority ?? 0) > 0);
+  if (moves.has('fakeout')) notes.push("Fake Out only works on the user's first turn on the field: it flinches one foe at priority +3, and the window is gone once this Pokemon has already acted or switched");
+  if (hasPriorityMove || moves.has('quickguard')) notes.push('Quick Guard blocks priority moves aimed at a side for one turn, including priority flinch attacks; moves with priority 0 are unaffected, and Psychic Terrain blocks priority against grounded targets');
+  const hasSingleTargetMove = (pokemon.moves ?? []).some(id => {
+    const target = input.dex.moves[toId(id)]?.target;
+    return target === 'normal' || target === 'any';
+  });
+  if (hasSingleTargetMove || moves.has('followme') || moves.has('ragepowder')) notes.push('Follow Me and Rage Powder can redirect single-target attacks onto the user; spread moves ignore redirection and Grass-type Pokemon are immune to powder moves');
+  const hasSpreadMove = (pokemon.moves ?? []).some(id => {
+    const target = input.dex.moves[toId(id)]?.target;
+    return target === 'allAdjacentFoes' || target === 'allAdjacent';
+  });
+  if (hasSpreadMove || moves.has('wideguard')) notes.push('Wide Guard blocks spread moves against a side for one turn; single-target moves pass through, so keep a single-target option available');
+  if (hasTeammate(p => (p.moves ?? []).some(m => toId(m) === 'helpinghand'))) notes.push("A teammate has Helping Hand: this Pokemon's next damage can be boosted x1.5 that turn, at the cost of the teammate's action");
+  if (moves.has('coaching')) notes.push("This Pokemon has Coaching: it can raise a teammate's Attack and Defense by one stage each at the cost of its own action");
+  else if (hasTeammate(p => (p.moves ?? []).some(m => toId(m) === 'coaching'))) notes.push("A teammate has Coaching: it raises this Pokemon's Attack and Defense by one stage each, arriving after the teammate spends its action");
+  if (moves.has('tailwind')) notes.push("Tailwind doubles this side's speed for four turns; it changes the speed order within each priority bracket and its effect ends on a known turn");
+  if (moves.has('partingshot')) notes.push('Parting Shot lowers the target Attack and Special Attack by one stage each and then switches the user out; it fails against substitutes and abilities that block stat drops');
+  if (moves.has('uturn') || moves.has('flipturn')) notes.push('This Pokemon can pivot out with a damaging move after the hit resolves; pivoting forfeits its remaining presence this turn while bringing in a teammate');
+  if (moves.has('knockoff')) notes.push("Knock Off removes the target's held item while dealing damage; it reveals the item, and item-dependent foes lose their boosts, but Mega Stones cannot be removed");
+  if (moves.has('perishsong')) notes.push('Perish Song sets a three-turn countdown on all active Pokemon; it forces switches and demands an exit plan before the counter reaches zero');
+  if (moves.has('yawn')) notes.push('Yawn puts the target to sleep at the end of its next turn unless it switches out; it is a slow-tempo tool that a switch can answer');
+  if (moves.has('auroraveil') || toId(input.state.weather ?? '') === 'snow') notes.push('Aurora Veil halves damage from attacks for five turns while snow is active; it fails without snow and does not reduce indirect damage');
+  if (input.state.weather || moves.has('weatherball')) notes.push('Weather boosts matching damage types and changes Weather Ball type and power; the weather is contested and expires, so do not assume it stays');
+  const seedItems = ['grassyseed', 'psychicseed', 'mistyseed', 'electricseed'];
+  if (seedItems.includes(item) && ability === 'unburden') notes.push('A terrain seed is consumed on terrain entry to raise one stat; with Unburden the consumption also doubles speed, so timing the consumption matters');
+  else if (hasTeammate(p => seedItems.includes(toId(p.item ?? '')) && toId(p.ability ?? p.baseAbility ?? '') === 'unburden')) notes.push('A teammate pairs a terrain seed with Unburden: that teammate doubles its speed once the seed is consumed');
   return result;
 }
 

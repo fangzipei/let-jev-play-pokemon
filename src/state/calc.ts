@@ -73,6 +73,8 @@ export interface DamageEstimateInput {
   defenderSpecies: string;
   isSpread?: boolean;
   weather?: string;
+  /** 覆盖招式基础威力（如 Last Respects 按已阵亡队友数成长） */
+  powerOverride?: number;
 }
 
 /**
@@ -83,7 +85,8 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const move = input.dex.moves[toId(input.moveId)];
   const def = input.dex.species[toId(input.defenderSpecies)];
   if (!move || !def) return null;
-  if (!move.basePower || move.basePower <= 0) return null;
+  const power = input.powerOverride ?? move.basePower;
+  if (!power || power <= 0) return null;
   const eff = knownEffectiveness(input.dex, move.type, def.types);
   if (eff === null) return null;
   if (eff === 0) return 0;
@@ -92,7 +95,7 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const defStat = (move.category === 'Physical' ? def.baseStats.def : def.baseStats.spd) ?? 100;
   const spread = input.isSpread ? 0.75 : 1;
   const weather = weatherModifier(input.weather, move.type);
-  const raw = move.basePower * (offStat / 150) * eff * stab * spread * weather;
+  const raw = power * (offStat / 150) * eff * stab * spread * weather;
   const pct = (raw * 100) / (defStat * 2 + 80);
   return Math.max(1, Math.min(150, Math.round(pct)));
 }

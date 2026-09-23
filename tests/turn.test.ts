@@ -126,4 +126,24 @@ describe('buildTurnPlans', () => {
     const plans = buildTurnPlans({dex, request, tracker: mkTracker()});
     expect(plans.map(p => p.slot)).toEqual([2]);
   });
+
+  it('move 选项注入战术注解：戏法空间机制、击掌首回合窗口与扫墓动态威力', () => {
+    const request = mkRequest();
+    request.active![0].moves[0] = {move: 'Fake Out', id: 'fakeout', pp: 10, maxpp: 10, target: 'normal'};
+    request.active![0].moves[1] = {move: 'Last Respects', id: 'lastrespects', pp: 10, maxpp: 10, target: 'normal'};
+    request.side.pokemon[0].moves = ['fakeout', 'lastrespects', 'leechlife', 'suckerpunch'];
+    request.side.pokemon[0].item = 'choicescarf';
+    const tracker = mkTracker();
+    tracker.handleLine('|faint|p1c: Tyranitar');
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const plans = buildTurnPlans({dex, request, tracker, analysis});
+    const fakeOut = plans[0].options.find(o => o.key === 'move_1_foe_a');
+    expect(fakeOut?.label).toMatch(/first action since entering the field/);
+    expect(fakeOut?.label).toMatch(/Choice Scarf locks this Pokemon into/);
+    const lastRespects = plans[0].options.find(o => o.key === 'move_2_foe_a');
+    expect(lastRespects?.label).toMatch(/≈100 BP/);
+    const trickRoom = plans[1].options.find(o => o.key === 'move_3');
+    expect(trickRoom?.label).toMatch(/5 turns/);
+    expect(trickRoom?.label).toMatch(/priority bracket/);
+  });
 });

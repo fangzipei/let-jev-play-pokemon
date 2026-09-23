@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import {loadConfig} from './config.js';
+import {reviewMemories} from './learn/review.js';
 import {createLogger} from './log/logger.js';
 import {runOnlineTeamCheck} from './match/online-check.js';
 import {runMatch} from './match/runner.js';
@@ -33,7 +34,19 @@ async function main(): Promise<number> {
     logger.close();
     return ok ? 0 : 1;
   }
-  console.error(`未知命令: ${command}（可用: play | validate-team [--online]）`);
+  if (command === 'review') {
+    const dryRun = process.argv.includes('--dry-run');
+    const cfg = loadConfig(process.env, {requireApiKey: false});
+    const report = await reviewMemories({
+      logDir: cfg.logDir, memoryDir: cfg.memoryDir, dryRun,
+      reviewModel: cfg.reviewModel, reviewApiKey: cfg.reviewApiKey, reviewMaxTokens: cfg.reviewMaxTokens,
+      log: msg => console.log(msg),
+    });
+    console.log(`复盘完成：处理 ${report.processed} 局，跳过 ${report.skipped} 局，失败 ${report.failed} 局${dryRun ? '（dry-run，未写库）' : ''}`);
+    if (report.modelError) console.warn(`模型复盘不可用：${report.modelError}`);
+    return 0;
+  }
+  console.error(`未知命令: ${command}（可用: play | validate-team [--online] | review [--dry-run]）`);
   return 1;
 }
 

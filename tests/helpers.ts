@@ -112,6 +112,9 @@ export function mkDex(): DexData {
     metagross: {name: 'Metagross', types: ['Steel', 'Psychic'], baseStats: {hp: 80, atk: 135, def: 130, spa: 95, spd: 90, spe: 70}, abilities: {0: 'Clear Body'}},
     corviknight: {name: 'Corviknight', types: ['Flying', 'Steel'], baseStats: {hp: 98, atk: 87, def: 105, spa: 53, spd: 85, spe: 67}, abilities: {0: 'Pressure'}},
     sableye: {name: 'Sableye', types: ['Dark', 'Ghost'], baseStats: {hp: 50, atk: 75, def: 75, spa: 65, spd: 65, spe: 50}, abilities: {0: 'Keen Eye'}},
+    incineroar: {name: 'Incineroar', types: ['Fire', 'Dark'], baseStats: {hp: 95, atk: 115, def: 90, spa: 80, spd: 90, spe: 60}, abilities: {0: 'Intimidate'}},
+    amoonguss: {name: 'Amoonguss', types: ['Grass', 'Poison'], baseStats: {hp: 114, atk: 85, def: 70, spa: 85, spd: 80, spe: 30}, abilities: {0: 'Regenerator'}},
+    rillaboom: {name: 'Rillaboom', types: ['Grass'], baseStats: {hp: 100, atk: 125, def: 90, spa: 60, spd: 70, spe: 85}, abilities: {0: 'Grassy Surge'}},
   };
   const mkMove = (name: string, type: string, basePower: number, category: string, target = 'normal', priority = 0) =>
     ({name, type, basePower, category, target, priority});
@@ -144,6 +147,23 @@ export function mkDex(): DexData {
     kowtowcleave: mkMove('Kowtow Cleave', 'Dark', 85, 'Physical'),
     encore: mkMove('Encore', 'Normal', 0, 'Status'),
     tailwind: mkMove('Tailwind', 'Flying', 0, 'Status', 'allySide'),
+    fakeout: mkMove('Fake Out', 'Normal', 40, 'Physical', 'normal', 3),
+    quickguard: mkMove('Quick Guard', 'Fighting', 0, 'Status', 'allySide', 3),
+    followme: mkMove('Follow Me', 'Normal', 0, 'Status', 'self', 2),
+    ragepowder: mkMove('Rage Powder', 'Bug', 0, 'Status', 'self', 2),
+    wideguard: mkMove('Wide Guard', 'Rock', 0, 'Status', 'allySide', 3),
+    helpinghand: mkMove('Helping Hand', 'Normal', 0, 'Status', 'adjacentAlly', 5),
+    coaching: mkMove('Coaching', 'Fighting', 0, 'Status', 'adjacentAlly'),
+    partingshot: mkMove('Parting Shot', 'Dark', 0, 'Status', 'normal'),
+    uturn: mkMove('U-turn', 'Bug', 70, 'Physical'),
+    flipturn: mkMove('Flip Turn', 'Water', 60, 'Physical'),
+    perishsong: mkMove('Perish Song', 'Normal', 0, 'Status', 'all'),
+    yawn: mkMove('Yawn', 'Normal', 0, 'Status', 'normal'),
+    auroraveil: mkMove('Aurora Veil', 'Ice', 0, 'Status', 'allySide'),
+    weatherball: mkMove('Weather Ball', 'Normal', 50, 'Special'),
+    flareblitz: mkMove('Flare Blitz', 'Fire', 120, 'Physical'),
+    moonblast: mkMove('Moonblast', 'Fairy', 95, 'Special'),
+    lastrespects: mkMove('Last Respects', 'Ghost', 50, 'Physical'),
   };
   const chart = normalizeTypechart({
     normal: {ghost: 0, rock: 0.5, steel: 0.5},

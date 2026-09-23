@@ -21,6 +21,8 @@ export interface PokemonState {
   volatiles: string[];
   singleTurn: string[];
   revealedMoves: string[];
+  /** 本次上场时的回合号（|start| 前的首发为 0）；用于判定"首个行动回合"（Fake Out 窗口、讲究锁招） */
+  switchInTurn?: number;
 }
 
 export interface SideState {
@@ -159,6 +161,7 @@ export class BattleTracker {
         p.boosts = {};
         p.volatiles = [];
         p.singleTurn = [];
+        p.switchInTurn = s.turn;
         break;
       }
       case 'detailschange':

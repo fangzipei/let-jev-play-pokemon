@@ -25,6 +25,7 @@ export function buildPreviewQuestions(input: {
   request: BattleRequest;
   opponentPreviewSpecies: string[];
   analysis?: AnalysisContext;
+  opponentLeadPriors?: string[];
 }): PreviewQuestionSet {
   const descriptionByKey: Record<string, string> = {};
   input.request.side.pokemon.forEach((pokemon, index) => {
@@ -44,8 +45,11 @@ export function buildPreviewQuestions(input: {
     : megaHolders === 1
       ? ' Your team has one Mega-capable Pokemon; include it in your four so you keep the option to Mega Evolve.'
       : '';
+  const leadPriors = input.analysis && input.analysis.level >= 2 && input.opponentLeadPriors?.length
+    ? ` Opponent lead tendencies from tournament priors: ${input.opponentLeadPriors.join('; ')}.`
+    : '';
   const intro = INTRO + (input.analysis && input.analysis.level >= 2
-    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + megaAdvice : '');
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + megaAdvice + leadPriors : '');
   const instructions: Record<string, string> = {
     lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
     lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,

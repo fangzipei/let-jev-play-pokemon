@@ -1,9 +1,11 @@
 import type {DexData} from '../dex/index.js';
+import type {PikaMeta} from '../dex/pikalytics.js';
 import {decideChoice, type PolicyConfig} from '../decide/policy.js';
 import type {AdvisorClient} from '../jev/advisor.js';
 import type {JevClient} from '../jev/client.js';
 import type {CallControl} from '../jev/deadline.js';
 import type {DecisionsUsage} from '../jev/types.js';
+import type {MemoryData} from '../learn/store.js';
 import type {Logger} from '../log/logger.js';
 import {parseLine, toId} from '../state/protocol.js';
 import {parseRequest, type BattleRequest} from '../state/request.js';
@@ -27,6 +29,9 @@ export interface BattleRoomOptions {
   dex: DexData;
   jev: JevClient | null;
   advisor?: AdvisorClient | null;
+  /** 统计先验与跨局经验（启动期加载一次，由会话透传） */
+  pika?: PikaMeta | null;
+  memory?: MemoryData | null;
   logger: Logger;
   conn: PsConnection;
   cfg: PolicyConfig;
@@ -187,6 +192,8 @@ export class BattleRoom {
         tracker: this.tracker,
         jev: this.heuristicMode ? null : this.opts.jev,
         advisor: this.heuristicMode ? null : this.opts.advisor,
+        pika: this.opts.pika,
+        memory: this.opts.memory,
         control,
         onUsage: (usage: DecisionsUsage) => this.recordUsage(usage, generation),
         logger: this.opts.logger,
@@ -255,6 +262,8 @@ export class BattleRoom {
         tracker: this.tracker,
         jev: null, // 原指令已被服务器判非法，直接改用本地启发式，不再调用模型
         advisor: null,
+        pika: this.opts.pika,
+        memory: this.opts.memory,
         control: this.activeDecision?.control,
         onUsage: (usage: DecisionsUsage) => this.recordUsage(usage, generation),
         logger: this.opts.logger,

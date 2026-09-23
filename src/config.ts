@@ -26,6 +26,13 @@ export interface AppConfig {
   sendRqid: boolean;
   logDir: string;
   logLevel: 'debug' | 'info' | 'warn';
+  pikaEnabled: boolean;
+  pikaCutoff: number;
+  pikaDir: string;
+  memoryDir: string;
+  reviewModel: string;
+  reviewApiKey: string;
+  reviewMaxTokens: number;
 }
 
 function parseAdvisorReasoning(raw: string | undefined): 'low' | 'medium' | 'high' | undefined {
@@ -68,6 +75,13 @@ export function loadConfig(
     sendRqid: env.SEND_RQID !== '0',
     logDir: env.LOG_DIR ?? 'logs',
     logLevel: (env.LOG_LEVEL ?? 'info') as AppConfig['logLevel'],
+    pikaEnabled: env.JEV_PIKA_ENABLED !== '0',
+    pikaCutoff: Number(env.JEV_PIKA_CUTOFF ?? 1760),
+    pikaDir: env.JEV_PIKA_DIR ?? '.cache/pikalytics',
+    memoryDir: env.JEV_MEMORY_DIR ?? '.cache/jev-memory',
+    reviewModel: (env.JEV_REVIEW_MODEL ?? '').trim(),
+    reviewApiKey: env.JEV_REVIEW_API_KEY?.trim() || mainKey,
+    reviewMaxTokens: Number(env.JEV_REVIEW_MAX_TOKENS ?? 2048),
   };
   validateConfig(cfg, opts);
   return cfg;
@@ -92,6 +106,12 @@ export function validateConfig(cfg: AppConfig, opts: {requireApiKey?: boolean} =
   }
   if (!Number.isSafeInteger(cfg.jevAdvisorMaxTokens) || cfg.jevAdvisorMaxTokens <= 0) {
     throw new Error('JEV_ADVISOR_MAX_TOKENS 必须是正安全整数');
+  }
+  if (!Number.isSafeInteger(cfg.pikaCutoff) || cfg.pikaCutoff <= 0) {
+    throw new Error('JEV_PIKA_CUTOFF 必须是正安全整数');
+  }
+  if (!Number.isSafeInteger(cfg.reviewMaxTokens) || cfg.reviewMaxTokens <= 0) {
+    throw new Error('JEV_REVIEW_MAX_TOKENS 必须是正安全整数');
   }
   if (cfg.startMode === 'challenge' && !cfg.challengeUser) {
     throw new Error('CHALLENGE_USER is required when START_MODE=challenge');

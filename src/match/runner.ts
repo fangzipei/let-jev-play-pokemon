@@ -1,7 +1,9 @@
 import {loadConfig, type AppConfig} from '../config.js';
 import {loadDex, type DexData} from '../dex/index.js';
+import {loadPikaMeta} from '../dex/pikalytics.js';
 import {createAdvisorClient} from '../jev/advisor.js';
 import {createJevClient, type JevClient} from '../jev/client.js';
+import {loadMemory} from '../learn/store.js';
 import {createLogger, type Logger} from '../log/logger.js';
 import type {BattleRoom, BattleSummary} from '../ps/battle-room.js';
 import {PsConnection, type WsLike} from '../ps/connection.js';
@@ -90,6 +92,17 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
       logger,
     })
     : null;
+  const pika = cfg.pikaEnabled
+    ? await loadPikaMeta({
+      format: cfg.psFormat, cutoff: cfg.pikaCutoff, cacheDir: cfg.pikaDir,
+      fetchImpl: opts.fetchImpl, log: msg => logger.warn(msg),
+    })
+    : null;
+  logger.info(pika
+    ? `Pikalytics 先验已加载（${pika.dataDate}，${Object.keys(pika.bySpecies).length} 物种）`
+    : 'Pikalytics 先验不可用（无假设注入）');
+  const memory = await loadMemory(cfg.memoryDir);
+  logger.info(`跨局经验库已加载（${Object.keys(memory.species).length} 物种）`);
   const paste = opts.paste ?? loadTeamPaste(cfg.teamFile);
   const team = packTeam(paste);
   const teamFallback = packTeam(stripMegaSuffix(paste));
@@ -104,6 +117,8 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
     dex,
     jev,
     advisor,
+    pika,
+    memory,
     packedTeam: team.packed,
     packedTeamFallback: teamFallback.packed,
     fetchImpl: opts.fetchImpl,

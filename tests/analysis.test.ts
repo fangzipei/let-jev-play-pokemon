@@ -305,3 +305,60 @@ describe('buildAnalysisContext 条件化角色', () => {
     expect(buildAnalysisContext(input).teamNotes[0].notes).toEqual([]);
   });
 });
+
+describe('buildAnalysisContext 新增条件注解（Reg M-C 热点）', () => {
+  function withBench() {
+    const input = setup();
+    input.dex.species.incineroar = {name: 'Incineroar', types: ['Fire', 'Dark'], baseStats: {hp: 95, atk: 115, def: 90, spa: 80, spd: 90, spe: 60}, abilities: {0: 'Intimidate'}} as any;
+    input.dex.species.amoonguss = {name: 'Amoonguss', types: ['Grass', 'Poison'], baseStats: {hp: 114, atk: 85, def: 70, spa: 85, spd: 80, spe: 30}, abilities: {0: 'Regenerator'}} as any;
+    input.request.side.pokemon.push(
+      {ident: 'p1: Incineroar', details: 'Incineroar, L50, M', condition: '180/180', active: false,
+        stats: {spe: 80}, moves: ['fakeout', 'knockoff', 'partingshot', 'flareblitz'], item: 'sitrusberry', ability: 'intimidate'},
+      {ident: 'p1: Amoonguss', details: 'Amoonguss, L50, F', condition: '196/196', active: false,
+        stats: {spe: 50}, moves: ['ragepowder', 'wideguard', 'coaching', 'sludgebomb'], item: 'grassyseed', ability: 'regenerator'},
+    );
+    return input;
+  }
+  it('Incineroar：先制阻挡、折返换场、道具移除', () => {
+    const notes = buildAnalysisContext(withBench()).teamNotes;
+    const text = notes[4].notes.join(' ');
+    expect(text).toMatch(/Fake Out.*first turn/i);
+    expect(text).toMatch(/Quick Guard/i);
+    expect(text).toMatch(/Parting Shot.*switch/i);
+    expect(text).toMatch(/Knock Off.*item/i);
+  });
+  it('Amoonguss：转移、守护、帮手与自身单体指向', () => {
+    const notes = buildAnalysisContext(withBench()).teamNotes;
+    const text = notes[5].notes.join(' ');
+    expect(text).toMatch(/Follow Me|Rage Powder/i);
+    expect(text).toMatch(/Wide Guard.*spread/i);
+    expect(text).toMatch(/Coaching/i);
+  });
+  it('顺风/灭歌/哈欠/极光幕/天气球/种子 各有条件触发', () => {
+    const input = setup();
+    input.request.side.pokemon.push(
+      {ident: 'p1: Corviknight', details: 'Corviknight, L50', condition: '187/187', active: false,
+        stats: {spe: 90}, moves: ['tailwind', 'yawn', 'auroraveil', 'uturn'], item: 'leftovers', ability: 'pressure'},
+      {ident: 'p1: Sableye', details: 'Sableye, L50', condition: '135/135', active: false,
+        stats: {spe: 70}, moves: ['perishsong', 'weatherball', 'flipturn', 'quickguard'], item: 'grassyseed', ability: 'unburden'},
+    );
+    input.state.weather = 'RainDance';
+    const notes = buildAnalysisContext(input).teamNotes;
+    const corv = notes[4].notes.join(' ');
+    expect(corv).toMatch(/Tailwind.*speed/i);
+    expect(corv).toMatch(/Yawn.*sleep|Yawn.*switch/i);
+    expect(corv).toMatch(/Aurora Veil.*halves/i);
+    expect(corv).toMatch(/U-turn|Flip Turn|pivot/i);
+    const sableye = notes[5].notes.join(' ');
+    expect(sableye).toMatch(/Perish Song.*countdown/i);
+    expect(sableye).toMatch(/Weather Ball|weather/i);
+    expect(sableye).toMatch(/seed.*Unburden|Unburden.*seed/i);
+    const joined = notes.slice(4).map(n => n.notes.join(' ')).join(' ');
+    expect(joined).not.toMatch(/permanent|fastest|guarantees survival|synergy with Trick Room/);
+  });
+  it('没有条件就没有注解（不编造）', () => {
+    const input = setup(); // 默认队伍含 suckerpunch（priority>0）与 heatwave（spread），会触发 Quick/Wide Guard，但不含下列
+    const notes = buildAnalysisContext(input).teamNotes.map(n => n.notes.join(' ')).join(' ');
+    expect(notes).not.toMatch(/Fake Out|Perish Song|Aurora Veil|Tailwind/);
+  });
+});

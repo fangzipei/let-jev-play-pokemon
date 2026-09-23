@@ -1,6 +1,6 @@
 import {speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
-import type {AnalysisContext} from '../state/analysis.js';
+import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
 import {toId} from '../state/protocol.js';
 import {
   activeEntries, benchEntries, isFainted, speciesOf, teamSlotOf,
@@ -101,6 +101,13 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
   const species = speciesOf(me);
   const types = speciesTypes(dex, species);
   const weather = tracker.state.weather;
+  const ourSideState = tracker.state.sides[tracker.state.ourSideId ?? request.side.id];
+  const trackedSelf = findOurPokemon(ourSideState, me);
+  // 上场后首个行动回合：Fake Out 唯一可用窗口，讲究道具的首个选择即锁招
+  const firstActionSinceSwitchIn = trackedSelf?.switchInTurn === undefined
+    ? undefined
+    : tracker.state.turn - trackedSelf.switchInTurn <= 1;
+  const faintedAllies = ourSideState?.pokemon.filter(p => p.fainted).length ?? 0;
   const options: SlotOption[] = [];
 
   for (let j = 0; j < reqActive.moves.length; j++) {
@@ -126,6 +133,10 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         attackerSlot: teamSlotOf(request, me),
         hitsBoth,
         weather,
+        fieldConditions: tracker.state.fieldConditions,
+        faintedAllies,
+        firstActionSinceSwitchIn,
+        attackerItem: me.item,
       });
       const action: SlotMoveAction = {kind: 'move', slot, moveIndex: j + 1};
       if (spec.target) action.target = spec.target;

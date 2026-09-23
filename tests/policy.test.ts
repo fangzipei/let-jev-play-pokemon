@@ -1,6 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {AdvisorClient} from '../src/jev/advisor.js';
 import {decideChoice, type DecisionContext} from '../src/decide/policy.js';
+import {parsePikaList, type PikaMeta} from '../src/dex/pikalytics.js';
 import type {DecideInput, JevClient} from '../src/jev/client.js';
 import type {Answer} from '../src/jev/types.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
@@ -383,5 +384,50 @@ describe('decideChoice - force switch', () => {
     expect(outcome?.command).toBe('/choose switch 3, switch 4|7');
     expect(outcome?.adjusted).toContain('adjusted:switch_slot_2: switch_4');
     expect(outcome?.fallback).toBe(false);
+  });
+});
+
+describe('对手注解与经验注入接线', () => {
+  const pika = parsePikaList([{
+    name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
+    abilities: [{ability: 'Chlorophyll', percent: '60'}], items: [{item: 'Focus Sash', percent: '40'}],
+    moves: [{move: 'Sludge Bomb', percent: '70'}], team: [], leads: [],
+  }], '2026-05', 'f') as PikaMeta;
+
+  it('L2 注入对手 notes；L1 不注入；pika/memory 缺省时仍给 confirmed', async () => {
+    let captured: any;
+    const ctx = mkCtx({jev: mkJev(input => {captured = input.state; return {};})});
+    ctx.cfg.jevContextLevel = 2;
+    ctx.pika = pika;
+    await decideChoice(ctx);
+    expect(captured.sides.opponent.active[0].notes.assumed.join(' ')).toContain('Chlorophyll');
+
+    let l1: any;
+    const ctxL1 = mkCtx({jev: mkJev(input => {l1 = input.state; return {};})});
+    ctxL1.cfg.jevContextLevel = 1;
+    ctxL1.pika = pika;
+    await decideChoice(ctxL1);
+    expect(l1.sides.opponent.active[0]).not.toHaveProperty('notes');
+
+    let basic: any;
+    const ctxBasic = mkCtx({jev: mkJev(input => {basic = input.state; return {};})});
+    ctxBasic.cfg.jevContextLevel = 2;
+    await decideChoice(ctxBasic);
+    expect(basic.sides.opponent.active[0]).not.toHaveProperty('notes');
+  });
+
+  it('team-preview 时对手首发先验进入 questions', async () => {
+    const request = mkRequest();
+    request.teamPreview = true;
+    request.active = undefined;
+    let captured: any;
+    const ctx = mkCtx({request, jev: mkJev(input => {captured = input.questions; return {};})});
+    ctx.cfg.jevContextLevel = 2;
+    ctx.pika = parsePikaList([{
+      name: 'Sneasler', rank: '2', percent: '30', winPercent: '50', stats: {spe: 120},
+      abilities: [], items: [], moves: [], team: [], leads: [{pokemon: 'Sneasler', percent: '14.3'}],
+    }], '2026-05', 'f');
+    await decideChoice(ctx);
+    expect(captured.lead_1.instructions).toContain('Sneasler 14.3%');
   });
 });

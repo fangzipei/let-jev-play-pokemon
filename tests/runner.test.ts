@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {loadConfig, type AppConfig} from '../src/config.js';
 import * as policy from '../src/decide/policy.js';
@@ -77,7 +80,13 @@ const PREVIEW_REQUEST =
 
 async function startHarness(overrides: Partial<AppConfig> = {}, fetchImpl?: typeof fetch) {
   const sockets: FakeWs[] = [];
-  const cfg = {...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot1000', PS_PASSWORD: ''}), ...overrides};
+  // 默认关闭 Pikalytics 预拉并隔离缓存/经验目录：测试不触网、不读写工作区 .cache。
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-scratch-'));
+  const cfg = {
+    ...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot1000', PS_PASSWORD: ''}),
+    pikaEnabled: false, pikaDir: path.join(scratch, 'pika'), memoryDir: path.join(scratch, 'memory'),
+    ...overrides,
+  };
   const runPromise = runMatch({
     cfg, logger: nullLogger, dex: mkDex(), paste: SIMPLE_PASTE, waitBattleTimeoutMs: 3000,
     fetchImpl,
@@ -167,11 +176,13 @@ describe('runMatch 主接线', () => {
   });
 
   it('连接关闭取消旧决策，真实重连后相同请求可以重新处理', async () => {
-    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
     let resolve!: (outcome: DecisionOutcome) => void;
     const pending = new Promise<DecisionOutcome>(yes => { resolve = yes; });
     const decide = vi.spyOn(policy, 'decideChoice').mockReturnValueOnce(pending).mockResolvedValue(wiringDecision);
+    // 启动阶段用真实定时器：runner 启动含文件 I/O（经验库加载），startHarness 内部的 waitFor 依赖真实 setTimeout。
+    // 启动完成后才冻结定时器，使 close→重连（1000ms）与决策窗口由测试推进。
     const {sockets, runPromise} = await startHarness();
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout']});
     sockets[0].message(requestFrame);
     const signal = decide.mock.calls[0][0].control?.signal;
     sockets[0].close();
@@ -287,7 +298,7 @@ describe('runMatch（最小流程）', () => {
 
   it('等待战斗超时抛出可读错误', async () => {
     const sockets: FakeWs[] = [];
-    const cfg = loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot2000', PS_PASSWORD: ''});
+    const cfg = {...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot2000', PS_PASSWORD: ''}), pikaEnabled: false};
     const runPromise = runMatch({
       cfg,
       logger: nullLogger,
@@ -307,5 +318,21 @@ describe('runMatch（最小流程）', () => {
     await waitFor(() => sockets[0].sent.some(s => s.startsWith('|/trn ')));
     sockets[0].message('|updateuser|JevBot2000|1|1\n');
     await expect(runPromise).rejects.toThrow(/超时/);
+  });
+
+  it('启动时预拉 Pikalytics 先验并加载经验库（失败静默降级）', async () => {
+    const calls: string[] = [];
+    const fakeFetch = (async (url: unknown) => {
+      calls.push(String(url));
+      return {ok: false, status: 503} as Response;
+    }) as unknown as typeof fetch;
+    const pikaDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pika-runner-'));
+    const memoryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-runner-'));
+    const {sockets, runPromise} = await startHarness({pikaEnabled: true, pikaDir, memoryDir}, fakeFetch);
+    sockets[0].open();
+    await waitFor(() => calls.some(u => u.includes('cdn.pikalytics.com/scripts/game.js')), 3000);
+    sockets[0].emit('close');
+    await runPromise.catch(() => {});
+    expect(calls.some(u => u.includes('cdn.pikalytics.com/scripts/game.js'))).toBe(true);
   });
 });

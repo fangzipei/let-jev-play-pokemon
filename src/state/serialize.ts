@@ -1,6 +1,7 @@
 import {canMegaWith, speciesTypes, type DexData} from '../dex/index.js';
 import {effectiveness, estimateDamagePercent, knownEffectiveness} from './calc.js';
 import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OurSpeed, type TeamThreat} from './analysis.js';
+import type {OpponentNoteSet} from './opponent-notes.js';
 import {toId} from './protocol.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import type {BattleState, PokemonState} from './tracker.js';
@@ -75,9 +76,10 @@ export interface SerializeInput {
   request: BattleRequest;
   dex: DexData;
   analysis?: AnalysisContext;
+  opponentNotes?: Record<string, OpponentNoteSet> | null;
 }
 
-export function buildStatePayload({state, request, dex, analysis}: SerializeInput): Record<string, unknown> {
+export function buildStatePayload({state, request, dex, analysis, opponentNotes}: SerializeInput): Record<string, unknown> {
   const ourSideId = state.ourSideId ?? request.side.id;
   const ourSideState = state.sides[ourSideId];
   const oppSideState = state.sides[ourSideId === 'p1' ? 'p2' : 'p1'];
@@ -107,6 +109,10 @@ export function buildStatePayload({state, request, dex, analysis}: SerializeInpu
   const opponentPokemon = (p: PokemonState) => {
     const seen = seenInBattle(p, state);
     const speed = analysis?.oppSpeedEstimates.find(s => s.ident === p.ident);
+    const noteSet = opponentNotes && analysis && analysis.level >= 2 ? opponentNotes[p.ident] : undefined;
+    const notes = noteSet
+      ? Object.fromEntries(Object.entries(noteSet).filter(([, lines]) => lines.length > 0))
+      : {};
     return {
       ident: p.ident, species: p.species, active_position: p.activePos, seen_in_battle: seen,
       hp_percent: seen ? p.hpPercent : null, status: seen ? p.status : null,
@@ -118,6 +124,7 @@ export function buildStatePayload({state, request, dex, analysis}: SerializeInpu
           slot: t.slot, ident: t.ident, rough_percent: i.roughPercent,
           revealed_moves: i.revealedMoves, unknown_moves: i.unknownMoves,
         })))} : {}),
+      ...(Object.keys(notes).length ? {notes} : {}),
     };
   };
   const opponents = oppSideState?.pokemon ?? [];
@@ -156,6 +163,57 @@ export interface MoveOptionInput {
   attackerSlot?: number;
   hitsBoth?: boolean;
   weather?: string;
+  /** 当前场地条件（如已激活的 Trick Room），用于场地类战术注解 */
+  fieldConditions?: string[];
+  /** 我方已阵亡数量（Last Respects 按此成长威力） */
+  faintedAllies?: number;
+  /** true = 本回合是该宝可梦本次上场后的首个行动回合（Fake Out 窗口、讲究锁招） */
+  firstActionSinceSwitchIn?: boolean;
+  /** 使用者的持道具（讲究类道具锁招注解） */
+  attackerItem?: string;
+}
+
+/** Last Respects 真实威力：50 基础 + 每名已阵亡队友 50（PS basePowerCallback） */
+const LAST_RESPECTS_BASE_POWER = 50;
+const CHOICE_ITEMS: Record<string, string> = {
+  choicescarf: 'Choice Scarf', choiceband: 'Choice Band', choicespecs: 'Choice Specs',
+};
+
+function lastRespectsPower(input: MoveOptionInput): number | undefined {
+  if (toId(input.moveId) !== 'lastrespects' || input.faintedAllies === undefined) return undefined;
+  return LAST_RESPECTS_BASE_POWER + LAST_RESPECTS_BASE_POWER * input.faintedAllies;
+}
+
+/** move 选项级战术注解：全部由真实机制与当前对局数据驱动，不设物种白名单 */
+function moveTacticNotes(input: MoveOptionInput): string[] {
+  const notes: string[] = [];
+  const move = input.dex.moves[toId(input.moveId)];
+  if (!move) return notes;
+  const moveId = toId(input.moveId);
+  if (moveId === 'trickroom') {
+    notes.push((input.fieldConditions ?? []).some(f => toId(f.replace(/^move:\s*/i, '')) === 'trickroom')
+      ? 'Trick Room is already active: using it again cancels the current Trick Room instead of extending it'
+      : 'Trick Room lasts 5 turns; within each priority bracket the slower Pokemon moves first (speed stats themselves are unchanged); at -7 priority it resolves last this turn');
+  }
+  const bp = lastRespectsPower(input);
+  if (bp !== undefined) {
+    notes.push(`Last Respects current power ≈${bp} BP (50 base + 50 per fainted ally; ${input.faintedAllies} fainted)`);
+  }
+  if (move.type === 'Water' && move.basePower > 0 && /sun/i.test(input.weather ?? '')) {
+    notes.push('the current sun halves Water-type damage; the damage estimate above already reflects this reduction');
+  }
+  if (moveId === 'fakeout') {
+    if (input.firstActionSinceSwitchIn === true) {
+      notes.push("Fake Out works only on the user's first action since entering the field, and this is that action: it flinches one foe at +3 priority if it lands");
+    } else if (input.firstActionSinceSwitchIn === false) {
+      notes.push('Fake Out will fail now: this Pokemon has already spent its first action since entering the field');
+    }
+  }
+  const choiceName = CHOICE_ITEMS[toId(input.attackerItem ?? '')];
+  if (input.firstActionSinceSwitchIn === true && choiceName) {
+    notes.push(`${choiceName} locks this Pokemon into the first move it uses until it switches out; this choice decides its role for this stint`);
+  }
+  return notes;
 }
 
 export function describeMoveOption(input: MoveOptionInput): string {
@@ -170,7 +228,7 @@ export function describeMoveOption(input: MoveOptionInput): string {
       const pct = estimateDamagePercent({
         dex: input.dex, moveId: input.moveId, attackerTypes: input.attackerTypes,
         attackerStats: input.attackerStats, defenderSpecies: input.target.species,
-        isSpread: input.hitsBoth, weather: input.weather,
+        isSpread: input.hitsBoth, weather: input.weather, powerOverride: lastRespectsPower(input),
       });
       const eff = effectiveness(input.dex, move.type, speciesTypes(input.dex, input.target.species));
       extras.push(`vs ${input.target.label} (${input.target.species}, ${input.target.hpPercent}% HP): ≈${pct ?? '?'}% damage${eff !== 1 ? ` (${eff}x)` : ''}`);
@@ -189,7 +247,7 @@ export function describeMoveOption(input: MoveOptionInput): string {
     for (const foe of foes) extras.push(`${foe.species} base speed ${foe.baseSpeed ?? 'unknown'}, actual speed unknown; move order unknown`);
     if (move?.priority) extras.push('priority bracket is checked before speed');
   }
-  return [head, ...extras].join(' ');
+  return [head, ...extras, ...moveTacticNotes(input)].join(' ');
 }
 
 export function describeSwitchOption(input: {

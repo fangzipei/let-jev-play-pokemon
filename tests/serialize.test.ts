@@ -167,6 +167,65 @@ describe('describeMoveOption', () => {
   });
 });
 
+describe('describeMoveOption 战术注解', () => {
+  const foe = {label: 'Foe A', species: 'Whimsicott', hpPercent: 100, ident: 'p2: Whimsicott'};
+  it('戏法空间选项给出 5 回合反序与 -7 最后结算的机制注解', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5,
+      attackerTypes: ['Ghost', 'Fire'], fieldConditions: [],
+    });
+    expect(text).toMatch(/5 turns/);
+    expect(text).toMatch(/slower.*moves first/i);
+    expect(text).toMatch(/priority bracket/);
+    expect(text).toMatch(/resolves last/i);
+  });
+  it('戏法空间已在场时警告再次使用会取消现有空间', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5,
+      attackerTypes: ['Ghost', 'Fire'], fieldConditions: ['move: Trick Room'],
+    });
+    expect(text).toMatch(/already active/);
+    expect(text).toMatch(/cancel/i);
+  });
+  it('扫墓按已阵亡队友数显示当前威力并按该威力估算伤害', () => {
+    const base = {dex, moveId: 'lastrespects', moveName: 'Last Respects', pp: 10, maxpp: 10,
+      attackerTypes: ['Water', 'Ghost'], attackerStats: {atk: 180}, target: foe};
+    const zero = describeMoveOption({...base, faintedAllies: 0});
+    const three = describeMoveOption({...base, faintedAllies: 3});
+    expect(zero).toMatch(/≈50 BP/);
+    expect(three).toMatch(/≈200 BP/);
+    expect(three).toMatch(/50 per fainted ally/);
+    const pct = (t: string) => Number(/≈(\d+)% damage/.exec(t)?.[1] ?? NaN);
+    expect(pct(three)).toBeGreaterThan(pct(zero));
+  });
+  it('晴天下水系伤害招式标注减半', () => {
+    const base = {dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
+      attackerTypes: ['Water'], attackerStats: {spa: 150}, target: foe};
+    const sunny = describeMoveOption({...base, weather: 'SunnyDay'});
+    expect(sunny).toMatch(/sun/i);
+    expect(sunny).toMatch(/halves Water/);
+    const rain = describeMoveOption({...base, weather: 'RainDance'});
+    expect(rain).not.toMatch(/halves Water/);
+  });
+  it('击掌奇袭按窗口状态区分可用提示与失败警告', () => {
+    const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
+      attackerTypes: ['Fire', 'Dark'], target: foe};
+    const open = describeMoveOption({...base, firstActionSinceSwitchIn: true});
+    expect(open).toMatch(/first action since entering the field/);
+    expect(open).toMatch(/flinch/i);
+    const closed = describeMoveOption({...base, firstActionSinceSwitchIn: false});
+    expect(closed).toMatch(/will fail/);
+  });
+  it('讲究道具持有者在首个行动回合标注锁招后果', () => {
+    const base = {dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
+      attackerTypes: ['Water'], attackerStats: {spa: 150}, target: foe, attackerItem: 'Choice Scarf'};
+    const first = describeMoveOption({...base, firstActionSinceSwitchIn: true});
+    expect(first).toMatch(/Choice Scarf locks this Pokemon into/);
+    const later = describeMoveOption({...base, firstActionSinceSwitchIn: false});
+    expect(later).not.toMatch(/locks this Pokemon into/);
+  });
+});
+
 describe('describeSwitchOption', () => {
   it('含属性、HP、道具与对手已揭示招式的来袭伤害', () => {
     const request = mkRequest();
@@ -194,5 +253,57 @@ describe('describePreviewCandidate', () => {
     expect(text).toContain('Bug/Steel');
     expect(text).toContain('Mega');
     expect(text).toMatch(/best:/);
+  });
+});
+
+import {buildOpponentNotes} from '../src/state/opponent-notes.js';
+import {parsePikaList} from '../src/dex/pikalytics.js';
+
+const pikaFixture = parsePikaList([{
+  name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
+  abilities: [{ability: 'Chlorophyll', percent: '60'}], items: [{item: 'Focus Sash', percent: '40'}],
+  moves: [{move: 'Sludge Bomb', percent: '70'}], team: [], leads: [{pokemon: 'Victreebel', percent: '9.5'}],
+}], '2026-05', 'f');
+
+describe('payload 对手注解注入', () => {
+  it('L2 注入 notes 四栏并省略空栏；L1 不注入', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-item|p2a: Victreebel|Choice Scarf');
+    tracker.handleLine('|move|p2a: Victreebel|Sludge Bomb|p1a: Golisopod');
+    const request = mkRequest();
+    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika: pikaFixture});
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const payload = buildStatePayload({dex, request, state: tracker.state, analysis, opponentNotes: notes}) as any;
+    const victreebel = payload.sides.opponent.active[0];
+    expect(victreebel.notes.confirmed).toContain('item confirmed: Choice Scarf');
+    expect(victreebel.notes.assumed.join(' ')).toContain('Chlorophyll');
+    expect(victreebel.notes.recent_actions).toContain('turn 1: used Sludge Bomb');
+    expect(victreebel.notes).not.toHaveProperty('memory');
+    const l1 = buildStatePayload({dex, request, state: tracker.state,
+      analysis: buildAnalysisContext({dex, request, state: tracker.state, level: 1}), opponentNotes: notes}) as any;
+    expect(l1.sides.opponent.active[0]).not.toHaveProperty('notes');
+  });
+  it('opponentNotes 为 null 时 payload 与旧行为一致', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex, request, state, level: 2});
+    const payload = buildStatePayload({dex, request, state, analysis, opponentNotes: null}) as any;
+    expect(payload.sides.opponent.active[0]).not.toHaveProperty('notes');
+  });
+});
+
+describe('buildPreviewQuestions 对手首发先验', () => {
+  it('L2 且传入 opponentLeadPriors 时进入 INTRO', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = mkRequest();
+    request.teamPreview = true;
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const set = buildPreviewQuestions({
+      dex, request, opponentPreviewSpecies: ['Victreebel'], analysis,
+      opponentLeadPriors: ['Victreebel 9.5%'],
+    });
+    expect(set.questions.lead_1.instructions).toContain('Victreebel 9.5%');
+    const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel'], analysis});
+    expect(none.questions.lead_1.instructions).not.toContain('lead tendencies');
   });
 });
