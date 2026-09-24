@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {describe, expect, it} from 'vitest';
-import {coreKey, emptyMemory, loadMemory, mergeObservation, queryForOpponent, saveMemory} from '../src/learn/store.js';
+import {applyModelNotes, coreKey, emptyMemory, loadMemory, mergeObservation, queryForOpponent, saveMemory} from '../src/learn/store.js';
 import type {BattleObservation} from '../src/learn/extract.js';
 
 function obs(partial: Partial<BattleObservation> = {}): BattleObservation {
@@ -68,7 +68,63 @@ describe('queryForOpponent', () => {
   });
 });
 
+describe('applyModelNotes', () => {
+  it('区分实际新增、重复、未匹配和超出保留上限的经验', () => {
+    const data = emptyMemory();
+    mergeObservation(data, obs());
+    data.species.sneasler.notes = ['old'];
+    const result = applyModelNotes(data, {
+      species: {Sneasler: ['old', 'new A', 'new A', 'new B', 'new C', 'new D'], Unknownmon: ['lost']},
+      cores: {'Sneasler + Rillaboom': ['core lesson']},
+    });
+    expect(result).toEqual({received: 8, added: 4, duplicates: 2, unmatched: 1, discarded: 1,
+      unmatchedKeys: ['species:Unknownmon']});
+    expect(data.species.sneasler.notes).toEqual(['new A', 'new B', 'new C']);
+    expect(data.cores['rillaboom+sneasler'].notes).toEqual(['core lesson']);
+    expect(applyModelNotes(data, {species: {Sneasler: ['new A']}, cores: {}}).added).toBe(0);
+  });
+
+  it('同一次返回的别名键合并计数，不重复统计被截断的新增', () => {
+    const data = emptyMemory();
+    mergeObservation(data, obs());
+    const result = applyModelNotes(data, {species: {Sneasler: [' A ', 'B'], sneasler: ['A', 'C', 'D']}, cores: {}});
+    expect(result).toMatchObject({received: 5, added: 3, duplicates: 1, discarded: 1});
+    expect(data.species.sneasler.notes).toEqual(['A', 'B', 'C']);
+  });
+
+  it('仅允许当前日志中的物种新增无统计经验记录，不把昵称旧记录迁移过去', () => {
+    const data = emptyMemory();
+    mergeObservation(data, obs({revealed: [{species: 'Indeedee', moves: [], itemConsumed: false, led: true}]}));
+    const before = structuredClone(data.species.indeedee);
+    const result = applyModelNotes(data, {
+      species: {'Indeedee-F': ['Follow Me pattern'], Invented: ['made up'], Indeedee: ['wrong identity']}, cores: {},
+    }, {species: ['Indeedee-F'], cores: []});
+    expect(result).toMatchObject({received: 3, added: 1, unmatched: 2});
+    expect(data.species.indeedeef).toMatchObject({name: 'Indeedee-F', seen: 0, wins: 0, losses: 0, notes: ['Follow Me pattern']});
+    expect(data.species.indeedee).toEqual(before);
+    expect(data.species.invented).toBeUndefined();
+    const text = queryForOpponent(data, ['Indeedee-F']).bySpecies.indeedeef.join(' ');
+    expect(text).toContain('Follow Me pattern');
+    expect(text).toContain('configuration statistics unavailable');
+    expect(text).not.toContain('0 battles seen');
+  });
+});
+
 describe('loadMemory / saveMemory', () => {
+  it('模型进度与规则 processed 独立保存，旧库缺字段保持未知', async () => {
+    const dir = await tmpDir();
+    const data = emptyMemory();
+    mergeObservation(data, obs());
+    expect(data.modelReviews['battle-1']).toBe('pending');
+    data.modelReviews['battle-1'] = 'empty';
+    await saveMemory(dir, data);
+    expect((await loadMemory(dir)).modelReviews).toEqual({'battle-1': 'empty'});
+    const {modelReviews: _progress, ...legacy} = data;
+    await fs.writeFile(path.join(dir, 'memory.json'), JSON.stringify(legacy));
+    const loaded = await loadMemory(dir);
+    expect(loaded.processed['battle-1']).toBeTruthy();
+    expect(loaded.modelReviews).toEqual({});
+  });
   it('往返一致；损坏文件回退空库', async () => {
     const dir = await tmpDir();
     expect(await loadMemory(dir)).toEqual(emptyMemory());

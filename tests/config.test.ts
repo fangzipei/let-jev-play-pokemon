@@ -131,15 +131,17 @@ describe('config', () => {
 });
 
 describe('Pikalytics 与复盘配置', () => {
-  it('默认值', () => {
+  it('Pikalytics 已停用：默认关闭，仅 JEV_PIKA_ENABLED=1 显式恢复', () => {
     expect(loadConfig(base)).toMatchObject({
-      pikaEnabled: true, pikaCutoff: 1760, pikaDir: '.cache/pikalytics',
+      pikaEnabled: false, pikaCutoff: 1760, pikaDir: '.cache/pikalytics',
       memoryDir: '.cache/jev-memory', reviewModel: '', reviewApiKey: 'sk-test',
     });
     expect(loadConfig(base).reviewMaxTokens).toBeUndefined();
-  });
-  it('显式覆盖与 PIKA_ENABLED=0 关闭', () => {
+    expect(loadConfig({...base, JEV_PIKA_ENABLED: '1'}).pikaEnabled).toBe(true);
     expect(loadConfig({...base, JEV_PIKA_ENABLED: '0'}).pikaEnabled).toBe(false);
+    expect(loadConfig({...base, JEV_PIKA_ENABLED: ''}).pikaEnabled).toBe(false);
+  });
+  it('显式覆盖', () => {
     expect(loadConfig({...base,
       JEV_PIKA_CUTOFF: '1500', JEV_PIKA_DIR: 'x/y', JEV_MEMORY_DIR: 'm/n',
       JEV_REVIEW_MODEL: 'vendor/model', JEV_REVIEW_API_KEY: ' rk ', JEV_REVIEW_MAX_TOKENS: '512',
@@ -156,5 +158,21 @@ describe('Pikalytics 与复盘配置', () => {
   it('JEV_REVIEW_MAX_TOKENS 留空或仅空白 = 不限制', () => {
     expect(loadConfig({...base, JEV_REVIEW_MAX_TOKENS: ''}).reviewMaxTokens).toBeUndefined();
     expect(loadConfig({...base, JEV_REVIEW_MAX_TOKENS: '   '}).reviewMaxTokens).toBeUndefined();
+  });
+});
+
+describe('Pokechamdb 使用率缓存配置', () => {
+  it('默认值', () => {
+    expect(loadConfig(base)).toMatchObject({chamdbDir: '.cache/pokechamdb', chamdbTtlHours: 24});
+  });
+  it('显式覆盖', () => {
+    expect(loadConfig({...base, JEV_CHAMDB_DIR: 'x/y', JEV_CHAMDB_TTL_HOURS: '6'}))
+      .toMatchObject({chamdbDir: 'x/y', chamdbTtlHours: 6});
+  });
+  it('非法 TTL 拒绝启动', () => {
+    for (const value of ['0', '-1', 'NaN', 'abc', '', ' ']) {
+      expect(() => loadConfig({...base, JEV_CHAMDB_TTL_HOURS: value}), `JEV_CHAMDB_TTL_HOURS=${value}`)
+        .toThrow(/JEV_CHAMDB_TTL_HOURS/);
+    }
   });
 });

@@ -1,6 +1,8 @@
 import {loadConfig, type AppConfig} from '../config.js';
+import {loadChamdbPriors} from '../dex/chamdb-priors.js';
 import {loadDex, type DexData} from '../dex/index.js';
-import {loadPikaMeta} from '../dex/pikalytics.js';
+import {loadPikaMeta, pikaToPriors} from '../dex/pikalytics.js';
+import type {PriorMeta} from '../dex/priors.js';
 import {createAdvisorClient} from '../jev/advisor.js';
 import {createJevClient, type JevClient} from '../jev/client.js';
 import {loadMemory} from '../learn/store.js';
@@ -92,15 +94,20 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
       logger,
     })
     : null;
-  const pika = cfg.pikaEnabled
-    ? await loadPikaMeta({
+  // 统计先验：默认从 pokechamdb 本地缓存构建（不上网）；JEV_PIKA_ENABLED=1 时恢复 Pikalytics。
+  let priors: PriorMeta | null;
+  if (cfg.pikaEnabled) {
+    const pikaMeta = await loadPikaMeta({
       format: cfg.psFormat, cutoff: cfg.pikaCutoff, cacheDir: cfg.pikaDir,
       fetchImpl: opts.fetchImpl, log: msg => logger.warn(msg),
-    })
-    : null;
-  logger.info(pika
-    ? `Pikalytics 先验已加载（${pika.dataDate}，${Object.keys(pika.bySpecies).length} 物种）`
-    : 'Pikalytics 先验不可用（无假设注入）');
+    });
+    priors = pikaMeta ? pikaToPriors(pikaMeta) : null;
+  } else {
+    priors = await loadChamdbPriors({cacheDir: cfg.chamdbDir, log: msg => logger.warn(msg)});
+  }
+  logger.info(priors
+    ? `统计先验已加载（${priors.label}，${Object.keys(priors.bySpecies).length} 物种）`
+    : '统计先验不可用（无假设注入）');
   const memory = await loadMemory(cfg.memoryDir);
   logger.info(`跨局经验库已加载（${Object.keys(memory.species).length} 物种）`);
   const paste = opts.paste ?? loadTeamPaste(cfg.teamFile);
@@ -117,7 +124,7 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
     dex,
     jev,
     advisor,
-    pika,
+    priors,
     memory,
     packedTeam: team.packed,
     packedTeamFallback: teamFallback.packed,

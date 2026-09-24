@@ -38,7 +38,7 @@ async function main(): Promise<number> {
     const dryRun = process.argv.includes('--dry-run');
     const cfg = loadConfig(process.env, {requireApiKey: false});
     const report = await reviewMemories({
-      logDir: cfg.logDir, memoryDir: cfg.memoryDir, dryRun,
+      logDir: cfg.logDir, memoryDir: cfg.memoryDir, dryRun, retryModel: process.argv.includes('--retry-model'),
       reviewModel: cfg.reviewModel, reviewApiKey: cfg.reviewApiKey, reviewMaxTokens: cfg.reviewMaxTokens,
       log: msg => console.log(msg),
     });
@@ -46,7 +46,7 @@ async function main(): Promise<number> {
     if (report.modelError) console.warn(`模型复盘不可用：${report.modelError}`);
     return 0;
   }
-  console.error(`未知命令: ${command}（可用: play | validate-team [--online] | review [--dry-run]）`);
+  console.error(`未知命令: ${command}（可用: play | validate-team [--online] | review [--dry-run] [--retry-model]）`);
   return 1;
 }
 

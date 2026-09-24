@@ -1,5 +1,5 @@
-import {megaFormsOf, type DexData} from '../dex/index.js';
-import type {PikaEntry, PikaMeta, PikaPair} from '../dex/pikalytics.js';
+import {megaFormsOf, type DexData, type SpeciesInfo} from '../dex/index.js';
+import {priorEntryFor, type PriorEntry, type PriorMeta, type PriorPair} from '../dex/priors.js';
 import {queryForOpponent, type MemoryData} from '../learn/store.js';
 import {parseIdent, parseLine, toId} from './protocol.js';
 import {weatherDoublesSpeed} from './speed-control.js';
@@ -15,7 +15,7 @@ export interface OpponentNoteSet {
 export interface OpponentNotesInput {
   state: BattleState;
   ourSideId: string;
-  pika?: PikaMeta | null;
+  priors?: PriorMeta | null;
   memory?: MemoryData | null;
   /** 对手 Mega 威胁注解需要 dex 中的 Mega 形态数据；缺省不输出该注解 */
   dex?: DexData;
@@ -224,37 +224,76 @@ export function recentOpponentActions(state: BattleState, ourSideId: string, lim
   return out;
 }
 
-function pikaEntryFor(pika: PikaMeta, species: string): PikaEntry | null {
-  const key = toId(species);
-  const candidates = [key, key.replace(/mega[xy]?$/, ''), `${key}mega`];
-  for (const candidate of candidates) {
-    if (candidate && pika.bySpecies[candidate]) return pika.bySpecies[candidate];
+function topList(list: PriorPair[], n: number): string {
+  return list.slice(0, n)
+    .map(x => `${x.name} ${x.percent.toFixed(1)}%${x.gloss ? ` [${x.gloss}]` : ''}`)
+    .join(' / ');
+}
+
+/** Mega 形态的 X/Y/Z 后缀标记（无后缀返回 null）。 */
+function megaFormMark(megaName: string): string | null {
+  return /-Mega-([A-Z])$/.exec(megaName)?.[1] ?? null;
+}
+
+/** 说明中独立出现的 X/Y/Z 标记（如 "into Mega Charizard X."）；非字母边界避免匹配单词内字母。 */
+function glossHasMark(gloss: string, mark: string): boolean {
+  return new RegExp(`(^|[^A-Za-z])${mark}(?![A-Za-z])`).test(gloss);
+}
+
+/** 说明中出现的形态标记（X/Y/Z 独立 token）；无标记返回 null。 */
+function glossFormMark(gloss: string): string | null {
+  for (const mark of ['X', 'Y', 'Z']) {
+    if (glossHasMark(gloss, mark)) return mark;
   }
   return null;
 }
 
-function topList(list: PikaPair[], n: number): string {
-  return list.slice(0, n).map(x => `${x.name} ${x.percent.toFixed(1)}%`).join(' / ');
-}
-
-/** 先验道具含该物种 Mega 石时的 Mega 威胁：形态、特性与速度变化（仅道具未知时推断）。 */
-function megaThreatNote(p: PokemonState, entry: PikaEntry, dex: DexData | undefined, source: string): string | null {
-  if (!dex || p.item || p.consumedItem) return null;
-  for (const mega of megaFormsOf(dex, p.species)) {
+/**
+ * 从先验道具中挑选该物种最可能的 Mega 形态：石匹配双路（英文道具名或说明含 Mega Evolve 且形态标记双向一致），
+ * 多形态时取占比最高的候选；无候选返回 null。
+ */
+export function likelyMegaForm(dex: DexData, species: string, entry: PriorEntry): {mega: SpeciesInfo; pair: PriorPair} | null {
+  let best: {mega: SpeciesInfo; pair: PriorPair} | null = null;
+  for (const mega of megaFormsOf(dex, species)) {
     const stone = mega.requiredItem;
-    const priorItem = stone ? entry.items.find(i => toId(i.name) === toId(stone)) : undefined;
-    if (!priorItem || priorItem.percent <= 0) continue;
-    const ability = Object.values(mega.abilities ?? {})[0];
-    const baseSpe = dex.species[toId(mega.baseSpecies ?? p.species)]?.baseStats.spe;
-    const speed = baseSpe !== undefined && mega.baseStats.spe !== baseSpe
-      ? `Speed ${mega.baseStats.spe} (from ${baseSpe})` : `Speed ${mega.baseStats.spe}`;
-    return `mega threat — likely ${stone} ${priorItem.percent.toFixed(1)}%: Mega form ${mega.name} has ${ability ?? 'an unknown ability'} and ${speed} ${source}`;
+    if (!stone) continue;
+    const mark = megaFormMark(mega.name);
+    for (const item of entry.items) {
+      if (item.percent <= 0) continue;
+      const byName = toId(item.name) === toId(stone);
+      // 双向标记校验：形态带标记时要求说明含同一标记；形态无标记时要求说明不含任何标记。
+      const itemMark = item.mega === true && item.gloss !== undefined ? glossFormMark(item.gloss) : null;
+      const byMark = item.mega === true && itemMark === mark;
+      if (!byName && !byMark) continue;
+      if (!best || item.percent > best.pair.percent) best = {mega, pair: item};
+    }
   }
-  return null;
+  return best;
+}
+
+/**
+ * 先验道具含该物种 Mega 石时的 Mega 威胁：形态属性（含变化）、特性与速度变化（仅道具未知时推断）。
+ * 形态已揭示（已 Mega 或 species 带 -Mega 后缀）时不再猜测。
+ */
+function megaThreatNote(p: PokemonState, entry: PriorEntry, dex: DexData | undefined, source: string): string | null {
+  if (!dex || p.item || p.consumedItem || p.mega) return null;
+  // 形态已由 switch/detailschange 直接揭示时，目标形态已知，不再输出先验猜测。
+  if (dex.species[toId(p.species)]?.requiredItem) return null;
+  const best = likelyMegaForm(dex, p.species, entry);
+  if (!best) return null;
+  const {mega, pair} = best;
+  const ability = Object.values(mega.abilities ?? {})[0];
+  const base = dex.species[toId(mega.baseSpecies ?? p.species)];
+  const baseSpe = base?.baseStats.spe;
+  const speed = baseSpe !== undefined && mega.baseStats.spe !== baseSpe
+    ? `Speed ${mega.baseStats.spe} (from ${baseSpe})` : `Speed ${mega.baseStats.spe}`;
+  const megaTypes = mega.types.join('/');
+  const baseTypes = base?.types.join('/');
+  return `mega threat — likely ${pair.name} ${pair.percent.toFixed(1)}%: Mega form ${mega.name} [${megaTypes}${baseTypes && baseTypes !== megaTypes ? `, from ${baseTypes}` : ''}] has ${ability ?? 'an unknown ability'} and ${speed} ${source}`;
 }
 
 /** 控速先验威胁：先验招式含控速招（未揭示且未激活）或未揭示天气速度特性（当前天气匹配时）。 */
-function speedControlThreatNotes(p: PokemonState, entry: PikaEntry, state: BattleState, source: string): string[] {
+function speedControlThreatNotes(p: PokemonState, entry: PriorEntry, state: BattleState, source: string): string[] {
   const notes: string[] = [];
   const revealed = new Set(p.revealedMoves.map(toId));
   for (const mv of entry.moves) {
@@ -277,11 +316,11 @@ function speedControlThreatNotes(p: PokemonState, entry: PikaEntry, state: Battl
 /** 合理假设（统计先验）；所有条目带 prior 来源标记，与 confirmed 严格区分。 */
 export function assumedNotes(
   p: PokemonState,
-  entry: PikaEntry,
-  opts: {dataDate: string; preview: boolean; dex?: DexData; megaAvailable?: boolean; state?: BattleState},
+  entry: PriorEntry,
+  opts: {label: string; preview: boolean; dex?: DexData; megaAvailable?: boolean; state?: BattleState},
 ): string[] {
   const notes: string[] = [];
-  const source = `(prior: Pikalytics ${opts.dataDate})`;
+  const source = `(prior: ${opts.label})`;
   const megaNote = opts.megaAvailable === false ? null : megaThreatNote(p, entry, opts.dex, source);
   if (megaNote) notes.push(megaNote);
   if (!p.item && !p.consumedItem && entry.items.length) {
@@ -304,10 +343,10 @@ export function assumedNotes(
 }
 
 /** 对手预览的 leads 占比概览（team-preview INTRO 用），降序 top-N。 */
-export function leadPriorLines(pika: PikaMeta | null | undefined, speciesList: string[], limit = 3): string[] {
-  if (!pika) return [];
+export function leadPriorLines(priors: PriorMeta | null | undefined, speciesList: string[], limit = 3): string[] {
+  if (!priors) return [];
   return speciesList
-    .map(species => ({species, entry: pikaEntryFor(pika, species)}))
+    .map(species => ({species, entry: priorEntryFor(priors, species)}))
     .map(({species, entry}) => {
       const own = entry?.leads.find(l => toId(l.name) === toId(species));
       return own && own.percent > 0 ? {species, percent: own.percent} : null;
@@ -327,7 +366,7 @@ export function buildOpponentNotes(input: OpponentNotesInput): Record<string, Op
   const query = input.memory ? queryForOpponent(input.memory, opponents.map(p => p.species)) : null;
   const out: Record<string, OpponentNoteSet> = {};
   for (const p of opponents) {
-    const entry = input.pika ? pikaEntryFor(input.pika, p.species) : null;
+    const entry = input.priors ? priorEntryFor(input.priors, p.species) : null;
     const key = toId(p.species);
     const coreLines = query
       ? query.cores.filter(core => core.key.split('+').includes(key)).map(core => core.text)
@@ -336,7 +375,9 @@ export function buildOpponentNotes(input: OpponentNotesInput): Record<string, Op
     out[p.ident] = {
       confirmed: confirmedNotes(input.state, p),
       recent_actions: recent.get(p.ident) ?? [],
-      assumed: entry && input.pika ? assumedNotes(p, entry, {dataDate: input.pika.dataDate, preview, dex: input.dex, megaAvailable, state: input.state}) : [],
+      assumed: entry && input.priors
+        ? assumedNotes(p, entry, {label: input.priors.label, preview, dex: input.dex, megaAvailable, state: input.state})
+        : [],
       memory: memoryLines,
     };
   }

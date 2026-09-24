@@ -20,10 +20,12 @@ export interface MemoryData {
   species: Record<string, SpeciesRecord>;
   cores: Record<string, CoreRecord>;
   processed: Record<string, string>;
+  /** 缺少条目表示旧库进度未知；pending 可补跑，empty 是成功但无模式。 */
+  modelReviews: Record<string, 'pending' | 'complete' | 'empty'>;
 }
 
 export function emptyMemory(): MemoryData {
-  return {version: 1, species: {}, cores: {}, processed: {}};
+  return {version: 1, species: {}, cores: {}, processed: {}, modelReviews: {}};
 }
 
 export async function loadMemory(dir: string): Promise<MemoryData> {
@@ -32,7 +34,8 @@ export async function loadMemory(dir: string): Promise<MemoryData> {
     if (!parsed || parsed.version !== 1 || typeof parsed.species !== 'object' || typeof parsed.cores !== 'object') {
       throw new Error('invalid');
     }
-    return {version: 1, species: parsed.species ?? {}, cores: parsed.cores ?? {}, processed: parsed.processed ?? {}};
+    return {version: 1, species: parsed.species ?? {}, cores: parsed.cores ?? {},
+      processed: parsed.processed ?? {}, modelReviews: parsed.modelReviews ?? {}};
   } catch {
     return emptyMemory();
   }
@@ -68,6 +71,7 @@ function topName(counter: Record<string, number>, limit: number): string[] {
 export function mergeObservation(data: MemoryData, obs: BattleObservation): void {
   if (data.processed[obs.battleId]) return;
   data.processed[obs.battleId] = new Date().toISOString();
+  data.modelReviews[obs.battleId] = 'pending';
   for (const r of obs.revealed) {
     const key = toId(r.species);
     if (!key) continue;
@@ -109,10 +113,14 @@ export function queryForOpponent(
   const bySpecies: Record<string, string[]> = {};
   const ranked = unique
     .map(key => [key, data.species[key]] as const)
-    .filter((pair): pair is readonly [string, SpeciesRecord] => !!pair[1] && pair[1].seen > 0)
+    .filter((pair): pair is readonly [string, SpeciesRecord] => !!pair[1] && (pair[1].seen > 0 || pair[1].notes.length > 0))
     .sort((a, b) => b[1].seen - a[1].seen)
     .slice(0, limits.species);
   for (const [key, record] of ranked) {
+    if (record.seen === 0) {
+      bySpecies[key] = [`${record.name}: review lesson (configuration statistics unavailable); note: ${record.notes[0]}`];
+      continue;
+    }
     const itemNames = topName(record.items, 2);
     const abilityNames = topName(record.abilities, 1);
     const summary = [...itemNames, ...abilityNames].join(' + ') || 'no consistent configuration observed';
@@ -138,23 +146,70 @@ export function queryForOpponent(
   return {bySpecies, cores};
 }
 
+export interface ModelNoteScope {species: string[]; cores: string[]}
+
+export interface ModelNoteApplication {
+  received: number;
+  added: number;
+  duplicates: number;
+  unmatched: number;
+  discarded: number;
+  unmatchedKeys: string[];
+}
+
+export function emptyModelApplication(): ModelNoteApplication {
+  return {received: 0, added: 0, duplicates: 0, unmatched: 0, discarded: 0, unmatchedKeys: []};
+}
+
 /** 模型复盘产物合并：每物种/组合 ≤3 条，新的优先保留。 */
 export function applyModelNotes(
   data: MemoryData,
   notes: {species: Record<string, string[]>; cores: Record<string, string[]>},
-): number {
-  let applied = 0;
-  for (const [name, list] of Object.entries(notes.species)) {
-    const record = data.species[toId(name)];
-    if (!record) continue;
-    record.notes = [...list.filter(n => !record.notes.includes(n)), ...record.notes].slice(0, 3);
-    applied += list.length;
+  scope?: ModelNoteScope,
+): ModelNoteApplication {
+  const result = emptyModelApplication();
+  const allowedSpecies = scope ? new Map(scope.species.map(name => [toId(name), name])) : null;
+  const normalizeCore = (key: string): string => key.split('+').map(toId).sort().join('+');
+  const allowedCores = scope ? new Set(scope.cores.map(normalizeCore)) : null;
+  // 别名键归并后再计数，避免同批多次更新同一记录而虚报新增。
+  const grouped = new Map<SpeciesRecord | CoreRecord, string[]>();
+  for (const section of ['species', 'cores'] as const) {
+    for (const [name, list] of Object.entries(notes[section])) {
+      result.received += list.length;
+      const key = section === 'species' ? toId(name) : normalizeCore(name);
+      const allowed = section === 'species' ? allowedSpecies : allowedCores;
+      if (allowed && !allowed.has(key)) {
+        result.unmatched += list.length;
+        result.unmatchedKeys.push(`${section}:${name}`);
+        continue;
+      }
+      // 仅当前日志确认的物种可补建无统计记录；绝不猜测或迁移昵称的历史计数。
+      if (section === 'species' && allowedSpecies?.has(key) && !data.species[key]) {
+        data.species[key] = {name: allowedSpecies.get(key)!, seen: 0, wins: 0, losses: 0, leads: 0,
+          items: {}, abilities: {}, moves: {}, notes: []};
+      }
+      const record = data[section][key];
+      if (!record) {
+        result.unmatched += list.length;
+        result.unmatchedKeys.push(`${section}:${name}`);
+        continue;
+      }
+      grouped.set(record, [...(grouped.get(record) ?? []), ...list]);
+    }
   }
-  for (const [key, list] of Object.entries(notes.cores)) {
-    const record = data.cores[key.replace(/\s*\+\s*/, '+').split('+').map(toId).sort().join('+')];
-    if (!record) continue;
-    record.notes = [...list.filter(n => !record.notes.includes(n)), ...record.notes].slice(0, 3);
-    applied += list.length;
+  for (const [record, list] of grouped) {
+    const previous = new Set(record.notes);
+    const fresh = new Set<string>();
+    for (const raw of list) {
+      const note = raw.trim();
+      if (!note) result.discarded++;
+      else if (previous.has(note) || fresh.has(note)) result.duplicates++;
+      else fresh.add(note);
+    }
+    record.notes = [...fresh, ...previous].slice(0, 3);
+    const added = record.notes.filter(n => !previous.has(n)).length;
+    result.added += added;
+    result.discarded += fresh.size - added;
   }
-  return applied;
+  return result;
 }

@@ -80,11 +80,12 @@ const PREVIEW_REQUEST =
 
 async function startHarness(overrides: Partial<AppConfig> = {}, fetchImpl?: typeof fetch) {
   const sockets: FakeWs[] = [];
-  // 默认关闭 Pikalytics 预拉并隔离缓存/经验目录：测试不触网、不读写工作区 .cache。
+  // 默认关闭 Pikalytics 预拉并隔离先验/经验目录：测试不触网、不读写工作区 .cache。
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-scratch-'));
   const cfg = {
     ...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot1000', PS_PASSWORD: ''}),
     pikaEnabled: false, pikaDir: path.join(scratch, 'pika'), memoryDir: path.join(scratch, 'memory'),
+    chamdbDir: path.join(scratch, 'chamdb'),
     ...overrides,
   };
   const runPromise = runMatch({
@@ -258,7 +259,11 @@ describe('summarizeBattles', () => {
 describe('runMatch（最小流程）', () => {
   it('登录 → 搜索 → 战斗房间 → team preview 决策 → 胜利汇总', async () => {
     const sockets: FakeWs[] = [];
-    const cfg = loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot1000', PS_PASSWORD: '', MAX_BATTLES: '1'});
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-scratch-'));
+    const cfg = {
+      ...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot1000', PS_PASSWORD: '', MAX_BATTLES: '1'}),
+      chamdbDir: path.join(scratch, 'chamdb'),
+    };
     const runPromise = runMatch({
       cfg,
       logger: nullLogger,
@@ -298,7 +303,11 @@ describe('runMatch（最小流程）', () => {
 
   it('等待战斗超时抛出可读错误', async () => {
     const sockets: FakeWs[] = [];
-    const cfg = {...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot2000', PS_PASSWORD: ''}), pikaEnabled: false};
+    const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'runner-scratch-'));
+    const cfg = {
+      ...loadConfig({JEV_MOCK: '1', PS_USERNAME: 'JevBot2000', PS_PASSWORD: ''}),
+      pikaEnabled: false, chamdbDir: path.join(scratch, 'chamdb'),
+    };
     const runPromise = runMatch({
       cfg,
       logger: nullLogger,
@@ -334,5 +343,45 @@ describe('runMatch（最小流程）', () => {
     sockets[0].emit('close');
     await runPromise.catch(() => {});
     expect(calls.some(u => u.includes('cdn.pikalytics.com/scripts/game.js'))).toBe(true);
+  });
+
+  it('默认路径：从 pokechamdb 本地缓存构建先验并透传到决策上下文；缺缓存时静默无先验', async () => {
+    // 预置最小可用的 chamdb 缓存（1 物种，无 notes 说明文件）
+    const chamdbDir = await fs.mkdtemp(path.join(os.tmpdir(), 'chamdb-runner-'));
+    const updatedAt = '2026-09-24T00:43:26.072+00:00';
+    await fs.writeFile(path.join(chamdbDir, 'meta.json'), JSON.stringify({
+      season: 'M-6', format: 'double', limit: 1, fetchedAt: updatedAt, rankingsUpdatedAt: updatedAt,
+      speciesCount: 1, fetched: [], skipped: [], failures: [],
+    }));
+    await fs.writeFile(path.join(chamdbDir, 'rankings-M-6-double.json'), JSON.stringify({
+      seasonId: 'M-6', format: 'double', updatedAt,
+      entries: [{rank: 1, pokemonJa: 'ゴリランダー', pokemonSlug: 'rillaboom'}],
+    }));
+    await fs.writeFile(path.join(chamdbDir, 'rillaboom.json'), JSON.stringify({
+      slug: 'rillaboom',
+      variants: {'M-6:double': {
+        seasonId: 'M-6', format: 'double', rank: 1, pokemonJa: 'ゴリランダー', pokemonSlug: 'rillaboom', dexNo: 812,
+        moves: [{rank: 1, percentage: 97.5, name: 'グラススライダー'}],
+        items: [], abilities: [], natures: [], evs: [], partners: [], updatedAt,
+      }},
+    }));
+    const decide = vi.spyOn(policy, 'decideChoice').mockResolvedValue(wiringDecision);
+    const {sockets, runPromise} = await startHarness({chamdbDir});
+    sockets[0].message(requestFrame);
+    await waitFor(() => decide.mock.calls.length > 0);
+    const ctx = decide.mock.calls[0][0];
+    expect(ctx.priors?.label).toBe('pokechamdb M-6 double 2026-09-24');
+    expect(ctx.priors?.bySpecies.rillaboom.moves[0]).toEqual({name: 'グラススライダー', percent: 97.5});
+    sockets[0].message('>battle-wiring\n|win|JevBot1000\n');
+    await runPromise;
+    // 缺缓存（空目录）时先验为 null，不影响决策链。
+    // 注意：decideChoice 已被 spy，二次 vi.spyOn 会返回同一 mock 实例，故复用并按下标区分两轮。
+    const callsBefore = decide.mock.calls.length;
+    const second = await startHarness();
+    second.sockets[0].message(requestFrame);
+    await waitFor(() => decide.mock.calls.length > callsBefore);
+    expect(decide.mock.calls[callsBefore][0].priors).toBeNull();
+    second.sockets[0].message('>battle-wiring\n|win|JevBot1000\n');
+    await second.runPromise;
   });
 });

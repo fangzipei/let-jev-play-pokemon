@@ -3,6 +3,8 @@ import {createJevClient} from '../src/jev/client.js';
 import {CallCancelledError, DeadlineExceededError} from '../src/jev/deadline.js';
 import {nullLogger} from '../src/log/logger.js';
 import type {Answer} from '../src/jev/types.js';
+import {decideChoice} from '../src/decide/policy.js';
+import {mkDex, mkRequest, mkTracker} from './helpers.js';
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('测试禁止真实网络'); }));
@@ -307,6 +309,35 @@ describe('jev 共享截止控制', () => {
 });
 
 describe('jev SDK 离线集成与日志安全', () => {
+  it.each(['sdk', 'fetch', 'chat'] as const)('%s 实际请求体保留整局上下文和各题胜利目标', async transport => {
+    const sdk = transport === 'sdk' ? await import('@openrouter/sdk') : undefined;
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
+    tracker.handleLine('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
+    tracker.handleLine('|turn|2');
+    let body: any;
+    const answers = {action_slot_1: {type: 'choice', choice: 'move_1_foe_a'}};
+    const impl = vi.fn<typeof fetch>(async (request, init) => {
+      body = request instanceof Request ? await request.json() : JSON.parse(String(init?.body));
+      return new Response(JSON.stringify(transport === 'chat'
+        ? {choices: [{message: {content: JSON.stringify({answers})}}]}
+        : {model: 'm', answers, usage: {input_tokens: 0, output_tokens: 0}}), {headers: {'Content-Type': 'application/json'}});
+    });
+    const result = await decideChoice({
+      dex: mkDex(), request: mkRequest(), tracker, battleId: tracker.state.id, logger: nullLogger,
+      cfg: {jevMock: false, sendRqid: true, jevContextLevel: 2},
+      jev: createJevClient({apiKey: 'offline', model: 'm', transport, retry: 0, fetchImpl: impl, loadSdk: async () => sdk}),
+    });
+    expect(result?.fallback).toBe(false);
+    expect(impl).toHaveBeenCalledTimes(1);
+    const input = transport === 'chat' ? JSON.parse(body.messages[1].content) : body;
+    expect(input.state.battle_context).toBeDefined();
+    expect(input.state.battle_context.recent_turns[0].events).toEqual([
+      '|move|p1a: Golisopod|Protect|p1a: Golisopod', '|move|p2b: Charizard|Heat Wave|p1a: Golisopod',
+    ]);
+    expect(input.state.battle_context.turn).toBe(2);
+    for (const q of Object.values(input.questions) as any[]) expect(q.instructions).toContain('win the entire battle');
+  });
   it('真实 SDK 序列化耗尽截止预算后不得启动底层 fetch', async () => {
     const sdk = await import('@openrouter/sdk');
     vi.useFakeTimers({now: 1000});

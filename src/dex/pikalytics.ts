@@ -1,6 +1,12 @@
+/**
+ * 【已停用 2026-09-24】Pikalytics 先验默认关闭（JEV_PIKA_ENABLED=1 可临时恢复）。
+ * 决策链路的统计先验已改由 pokechamdb 本地快照供应（src/dex/chamdb-priors.ts）；
+ * 本模块经 pikaToPriors 适配为同一 PriorMeta 结构，保留实现与测试以便回退。
+ */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {toId} from '../state/protocol.js';
+import type {PriorEntry, PriorMeta, PriorPair} from './priors.js';
 
 export interface PikaPair {name: string; percent: number}
 
@@ -293,4 +299,22 @@ export async function loadPikaMeta(opts: LoadPikaOptions): Promise<PikaMeta | nu
   await enrichDetails(meta, opts, doFetch, timeoutMs, checkpoint);
   await checkpoint();
   return meta;
+}
+
+function toPriorPairs(pairs: PikaPair[]): PriorPair[] {
+  return pairs.map(pair => ({name: pair.name, percent: pair.percent}));
+}
+
+/** PikaMeta → 统一的先验结构（JEV_PIKA_ENABLED=1 恢复路径经 runner 适配使用）。 */
+export function pikaToPriors(meta: PikaMeta): PriorMeta {
+  const bySpecies: Record<string, PriorEntry> = {};
+  for (const [key, entry] of Object.entries(meta.bySpecies)) {
+    bySpecies[key] = {
+      items: toPriorPairs(entry.items),
+      abilities: toPriorPairs(entry.abilities),
+      moves: toPriorPairs(entry.moves),
+      leads: toPriorPairs(entry.leads),
+    };
+  }
+  return {label: `Pikalytics ${meta.dataDate}`, bySpecies};
 }

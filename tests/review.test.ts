@@ -1,10 +1,11 @@
 // tests/review.test.ts
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import {reviewMemories} from '../src/learn/review.js';
-import {loadMemory} from '../src/learn/store.js';
+import {emptyMemory, loadMemory, saveMemory} from '../src/learn/store.js';
 
 const PROTOCOL = [
   '|player|p1|JevBot1234|1|1500', '|player|p2|rival|2|1500',
@@ -26,7 +27,207 @@ async function scaffold(): Promise<{logDir: string; memoryDir: string}> {
   return {logDir, memoryDir};
 }
 
+function modelResponse(content: unknown): Response {
+  return {ok: true, status: 200,
+    text: async () => JSON.stringify({choices: [{message: {content: JSON.stringify(content)}}]}),
+  } as Response;
+}
+
+const LESSON = {species: {Sneasler: ['Fake Out pressure']}, cores: {}};
+const MODEL = {reviewModel: 'test/model', reviewApiKey: 'test-key', retryDelayMs: 0};
+
 describe('reviewMemories', () => {
+  it('规则入库后再开启模型可补跑，模型成功后不重复调用或累计战绩', async () => {
+    const dirs = await scaffold();
+    await reviewMemories(dirs);
+    let calls = 0;
+    const fetchImpl = (async () => { calls++; return modelResponse(LESSON); }) as typeof fetch;
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl});
+    expect(report).toMatchObject({processed: 0, skipped: 1, modelReviewed: 1, modelPending: 0,
+      modelApplication: {received: 1, added: 1, duplicates: 0, unmatched: 0}});
+    const memory = await loadMemory(dirs.memoryDir);
+    expect(memory.modelReviews['battle-aaa']).toBe('complete');
+    expect(memory.species.sneasler.seen).toBe(1);
+    expect(memory.cores['rillaboom+sneasler'].seen).toBe(1);
+    await reviewMemories({...dirs, ...MODEL, fetchImpl});
+    expect(calls).toBe(1);
+  });
+
+  it('CLI --retry-model --dry-run 接线有效，不读真实环境或写库', async () => {
+    const dirs = await scaffold();
+    await reviewMemories(dirs);
+    const data = await loadMemory(dirs.memoryDir);
+    data.modelReviews['battle-aaa'] = 'complete';
+    await saveMemory(dirs.memoryDir, data);
+    const before = await fs.readFile(path.join(dirs.memoryDir, 'memory.json'), 'utf8');
+    const child = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts', 'review', '--retry-model', '--dry-run'], {
+      encoding: 'utf8', timeout: 15000,
+      env: {...process.env, DOTENV_CONFIG_PATH: path.join(dirs.logDir, 'nonexistent.env'),
+        LOG_DIR: dirs.logDir, JEV_MEMORY_DIR: dirs.memoryDir, JEV_REVIEW_MODEL: '', JEV_REVIEW_API_KEY: '',
+        OPENROUTER_API_KEY: '', JEV_MOCK: '1'},
+    });
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).toContain('重新提炼 1 局');
+    expect(child.stdout).toContain('待模型复盘 1 局');
+    expect(await fs.readFile(path.join(dirs.memoryDir, 'memory.json'), 'utf8')).toBe(before);
+  }, 20000);
+
+  it('模型输出被截断时不把补全后的部分 JSON 标记成功', async () => {
+    const dirs = await scaffold();
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl: (async () => ({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({choices: [{finish_reason: 'length', message: {content: '{"species":{"Sneasler":["partial'}}]}),
+    } as Response)) as typeof fetch});
+    expect(report.modelError).toContain('finish_reason=length');
+    expect(report.modelPending).toBe(1);
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.notes).toEqual([]);
+  });
+
+  it('模型产物保存失败不报告写入成功，也不持久化完成标记', async () => {
+    const dirs = await scaffold();
+    const messages: string[] = [];
+    const rename = fs.rename.bind(fs);
+    let saves = 0;
+    const spy = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+      if (++saves === 2) throw new Error('test disk failure');
+      return rename(...args);
+    });
+    try {
+      const report = await reviewMemories({...dirs, ...MODEL, log: m => messages.push(m),
+        fetchImpl: (async () => modelResponse(LESSON)) as typeof fetch});
+      expect(report.modelError).toContain('test disk failure');
+      expect(report).toMatchObject({modelReviewed: 0, modelPending: 1, modelApplication: {added: 0}});
+      expect(messages.join('\n')).not.toContain('（已保存）');
+      const saved = await loadMemory(dirs.memoryDir);
+      expect(saved.modelReviews['battle-aaa']).toBe('pending');
+      expect(saved.species.sneasler.notes).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+    const retry = await reviewMemories({...dirs, ...MODEL, fetchImpl: (async () => modelResponse(LESSON)) as typeof fetch});
+    expect(retry.modelReviewed).toBe(1);
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.seen).toBe(1);
+  });
+
+  it('模型失败后下次仅补模型，不重加规则统计', async () => {
+    const dirs = await scaffold();
+    const failed = await reviewMemories({...dirs, ...MODEL, fetchImpl: (async () => {
+      return {ok: false, status: 503} as Response;
+    }) as typeof fetch});
+    expect(failed.modelError).toContain('503');
+    expect(failed.modelPending).toBe(1);
+    const recovered = await reviewMemories({...dirs, ...MODEL,
+      fetchImpl: (async () => modelResponse(LESSON)) as typeof fetch});
+    expect(recovered.modelReviewed).toBe(1);
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.seen).toBe(1);
+  });
+
+  it('合法空结果明确解释并记录 empty，普通重跑不重复付费', async () => {
+    const dirs = await scaffold();
+    const messages: string[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => { calls++; return modelResponse({species: {}, cores: {}}); }) as typeof fetch;
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl, log: m => messages.push(m)});
+    expect(report.modelApplication).toMatchObject({received: 0, added: 0, unmatched: 0});
+    expect(messages.join('\n')).toContain('未发现可重复模式');
+    expect((await loadMemory(dirs.memoryDir)).modelReviews['battle-aaa']).toBe('empty');
+    await reviewMemories({...dirs, ...MODEL, fetchImpl});
+    expect(calls).toBe(1);
+  });
+
+  it.each([{}, [], null, {species: {Sneasler: 'wrong'}}, {species: {Sneasler: [' ']}}, {cores: []}].map(content => [content]))(
+    '格式错误不冒充空经验成功：%j', async content => {
+      const dirs = await scaffold();
+      const report = await reviewMemories({...dirs, ...MODEL,
+        fetchImpl: (async () => modelResponse(content)) as typeof fetch});
+      expect(report.modelError).toContain('响应格式错误');
+      expect(report.modelPending).toBe(1);
+      expect((await loadMemory(dirs.memoryDir)).modelReviews['battle-aaa']).toBe('pending');
+    },
+  );
+
+  it('未匹配键明确报告且保持待补跑，不标记模型成功', async () => {
+    const dirs = await scaffold();
+    const messages: string[] = [];
+    const report = await reviewMemories({...dirs, ...MODEL, log: m => messages.push(m),
+      fetchImpl: (async () => modelResponse({species: {Invented: ['lesson']}, cores: {}})) as typeof fetch});
+    expect(report.modelApplication).toMatchObject({received: 1, added: 0, unmatched: 1, unmatchedKeys: ['species:Invented']});
+    expect(report).toMatchObject({modelPending: 1, modelReviewed: 0});
+    expect(messages.join('\n')).toContain('未匹配键：species:Invented');
+    expect((await loadMemory(dirs.memoryDir)).modelReviews['battle-aaa']).toBe('pending');
+  });
+
+  it('旧库不静默重跑付费模型；显式 retryModel 可补写正确物种，不污染历史计数', async () => {
+    const dirs = await scaffold();
+    const protocol = PROTOCOL.replaceAll('Sneasler, L50, F', 'Indeedee-F, L50, F').replaceAll('p2a: Sneasler', 'p2a: Indeedee');
+    await fs.writeFile(path.join(dirs.logDir, 'battle-aaa.protocol.log'), protocol);
+    const legacy = emptyMemory();
+    legacy.processed['battle-aaa'] = 'old-time';
+    legacy.species.indeedee = {name: 'Indeedee', seen: 2, wins: 1, losses: 1, leads: 2,
+      items: {}, abilities: {}, moves: {}, notes: ['legacy note']};
+    await saveMemory(dirs.memoryDir, legacy);
+    let calls = 0;
+    const fetchImpl = (async () => { calls++; return modelResponse({species: {'Indeedee-F': ['Follow Me pattern']}, cores: {}}); }) as typeof fetch;
+    const messages: string[] = [];
+    await reviewMemories({...dirs, ...MODEL, fetchImpl, log: m => messages.push(m)});
+    expect(calls).toBe(0);
+    expect(messages.join('\n')).toContain('--retry-model');
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl, retryModel: true});
+    expect(calls).toBe(1);
+    expect(report).toMatchObject({processed: 0, modelReviewed: 1, modelApplication: {added: 1}});
+    const after = await loadMemory(dirs.memoryDir);
+    expect(after.species.indeedee).toEqual(legacy.species.indeedee);
+    expect(after.species.indeedeef.notes).toEqual(['Follow Me pattern']);
+    expect(after.processed).toEqual(legacy.processed);
+  });
+
+  it('retryModel 可重新提炼已成功对局，重复经验不虚报新增', async () => {
+    const dirs = await scaffold();
+    const fetchImpl = (async () => modelResponse(LESSON)) as typeof fetch;
+    await reviewMemories({...dirs, ...MODEL, fetchImpl});
+    const messages: string[] = [];
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl, retryModel: true, log: m => messages.push(m)});
+    expect(report.modelApplication).toMatchObject({received: 1, added: 0, duplicates: 1});
+    expect(messages.join('\n')).toContain('新增 0');
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.seen).toBe(1);
+  });
+
+  it('retryModel 的 dry-run 不写库、不请求模型，列出待复盘数量', async () => {
+    const dirs = await scaffold();
+    await reviewMemories(dirs);
+    const before = await fs.readFile(path.join(dirs.memoryDir, 'memory.json'), 'utf8');
+    let calls = 0;
+    const report = await reviewMemories({...dirs, ...MODEL, retryModel: true, dryRun: true,
+      fetchImpl: (async () => { calls++; return modelResponse(LESSON); }) as typeof fetch});
+    expect(calls).toBe(0);
+    expect(report.modelPending).toBe(1);
+    expect(await fs.readFile(path.join(dirs.memoryDir, 'memory.json'), 'utf8')).toBe(before);
+  });
+
+  it('多批复盘第二批失败时保留第一批，下次只补失败批次', async () => {
+    const dirs = await scaffold();
+    for (let i = 0; i < 20; i++) {
+      const id = `battle-extra-${String(i).padStart(2, '0')}`;
+      await fs.writeFile(path.join(dirs.logDir, `${id}.protocol.log`), PROTOCOL);
+      await fs.writeFile(path.join(dirs.logDir, `${id}.decisions.jsonl`), DECISIONS);
+    }
+    let calls = 0;
+    const first = await reviewMemories({...dirs, ...MODEL, fetchImpl: (async () => {
+      calls++;
+      return calls === 1 ? modelResponse(LESSON) : {ok: false, status: 503} as Response;
+    }) as typeof fetch});
+    expect(first).toMatchObject({modelReviewed: 20, modelPending: 1});
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.notes).toEqual(LESSON.species.Sneasler);
+    const bodies: string[] = [];
+    const second = await reviewMemories({...dirs, ...MODEL, fetchImpl: (async (_url, init) => {
+      bodies.push(String(init?.body)); return modelResponse(LESSON);
+    }) as typeof fetch});
+    expect(second).toMatchObject({processed: 0, modelReviewed: 1, modelPending: 0});
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]).messages[1].content.split('\n').filter((line: string) => line.startsWith('battle '))).toHaveLength(1);
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.seen).toBe(21);
+  });
+
   it('提取新日志并入经验库；重复运行自动跳过', async () => {
     const {logDir, memoryDir} = await scaffold();
     const first = await reviewMemories({logDir, memoryDir});

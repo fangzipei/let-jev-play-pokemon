@@ -21,6 +21,10 @@ export interface PokemonState {
   volatiles: string[];
   singleTurn: string[];
   revealedMoves: string[];
+  /** 整局显式揭示的道具/特性与已终止道具，不随当前值变化或日志裁剪清空。 */
+  revealedItems?: string[];
+  revealedAbilities?: string[];
+  endedItems?: string[];
   /** 本次上场时的回合号（|start| 前的首发为 0）；用于判定"首个行动回合"（Fake Out 窗口、讲究锁招） */
   switchInTurn?: number;
 }
@@ -29,6 +33,8 @@ export interface SideState {
   id: string;
   name?: string;
   teamSize: number;
+  /** 服务端真实 teamsize 值；不含默认值，也不保证等于实际带入人数。 */
+  reportedTeamSize?: number;
   pokemon: PokemonState[];
   sideConditions: string[];
   /** sideConditions 各项的激活回合（key = toId 归一化名），用于计算控速剩余回合 */
@@ -52,6 +58,8 @@ export interface BattleState {
   winner?: string;
   ended: boolean;
   log: string[];
+  /** 日志曾发生头部裁剪；长期事实仍由 tracker 保留。 */
+  logTruncated?: boolean;
 }
 
 function newSide(id: string): SideState {
@@ -135,11 +143,27 @@ export class BattleTracker {
 
   handleLine(raw: string): void {
     this.state.log.push(raw);
-    if (this.state.log.length > 5000) this.state.log.splice(0, 1000);
+    if (this.state.log.length > 5000) {
+      this.state.log.splice(0, 1000);
+      this.state.logTruncated = true;
+    }
     const line = parseLine(raw);
     if (!line) return;
     const s = this.state;
     const [a0, a1, a2] = line.args;
+
+    // 只记录协议明示的结算/天气来源，不借助前后动作猜测归属，也不改写当前道具或特性。
+    if (['-damage', '-heal', '-weather'].includes(line.type)) {
+      const effect = line.args.find(a => a.startsWith('[from] '))?.match(/^\[from\] (item|ability): (.+)$/);
+      const owner = line.args.find(a => a.startsWith('[of] '));
+      const ident = parseIdent(owner ? owner.slice(5) : a0);
+      const p = ident && this.findPokemon(ident.side, ident.name);
+      if (p && effect) {
+        const key = effect[1] === 'item' ? 'revealedItems' : 'revealedAbilities';
+        const revealed = (p[key] ??= []);
+        if (!revealed.includes(effect[2])) revealed.push(effect[2]);
+      }
+    }
 
     switch (line.type) {
       case 'player': {
@@ -149,9 +173,12 @@ export class BattleTracker {
         if (norm(a1) === norm(this.ourName)) s.ourSideId = a0;
         break;
       }
-      case 'teamsize':
+      case 'teamsize': {
+        const reported = Number(a1);
+        if (Number.isSafeInteger(reported) && reported > 0) this.side(a0).reportedTeamSize = reported;
         this.side(a0).teamSize = Number(a1) || 6;
         break;
+      }
       case 'poke': {
         const d = parseDetails(a1);
         this.ensurePokemon(a0, d.species, d.species);
@@ -204,6 +231,7 @@ export class BattleTracker {
         const p = ident && this.findPokemon(ident.side, ident.name);
         if (p && ident) {
           p.mega = true;
+          if (a2 && !(p.revealedItems ??= []).includes(a2)) p.revealedItems.push(a2);
           this.side(ident.side).megaUsed = true;
         }
         break;
@@ -336,6 +364,7 @@ export class BattleTracker {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
         if (p && a1) {
+          if (!(p.revealedItems ??= []).includes(a1)) p.revealedItems.push(a1);
           p.item = a1;
           p.consumedItem = false;
         }
@@ -345,6 +374,10 @@ export class BattleTracker {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
         if (p) {
+          if (a1) {
+            if (!(p.revealedItems ??= []).includes(a1)) p.revealedItems.push(a1);
+            if (!(p.endedItems ??= []).includes(a1)) p.endedItems.push(a1);
+          }
           p.item = undefined;
           p.consumedItem = true;
         }
@@ -353,7 +386,10 @@ export class BattleTracker {
       case '-ability': {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
-        if (p && a1 && !['none', 'hidden'].includes(a1)) p.ability = a1;
+        if (p && a1 && !['none', 'hidden'].includes(a1)) {
+          if (!(p.revealedAbilities ??= []).includes(a1)) p.revealedAbilities.push(a1);
+          p.ability = a1;
+        }
         break;
       }
       case '-start': {

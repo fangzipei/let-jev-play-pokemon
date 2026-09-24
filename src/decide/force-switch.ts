@@ -5,8 +5,9 @@ import {describeSwitchOption, opponentActives} from '../state/serialize.js';
 import {speedControlText} from '../state/speed-control.js';
 import type {BattleTracker} from '../state/tracker.js';
 import type {SlotOption, SlotQuestionPlan} from './turn.js';
+import {BATTLE_GOAL} from './battle-goal.js';
 
-const SWITCH_INTRO =
+const SWITCH_INTRO = BATTLE_GOAL +
   'The server requires a replacement for this slot, for example after fainting or a forced pivot. Pick exactly ONE bench Pokemon to send in. ' +
   'The replacement enters the field immediately and will be exposed to the opponents listed below.';
 

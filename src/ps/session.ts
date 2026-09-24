@@ -1,6 +1,6 @@
 import type {AppConfig} from '../config.js';
 import type {DexData} from '../dex/index.js';
-import type {PikaMeta} from '../dex/pikalytics.js';
+import type {PriorMeta} from '../dex/priors.js';
 import type {AdvisorClient} from '../jev/advisor.js';
 import type {JevClient} from '../jev/client.js';
 import type {MemoryData} from '../learn/store.js';
@@ -23,7 +23,7 @@ export interface PsSessionOptions {
   jev: JevClient | null;
   advisor?: AdvisorClient | null;
   /** 统计先验与跨局经验（启动期加载一次，透传给每个战斗房间） */
-  pika?: PikaMeta | null;
+  priors?: PriorMeta | null;
   memory?: MemoryData | null;
   packedTeam: string;
   /** 队伍被拒绝时的剥离 -Mega 重打包版本（spec 不确定项 1） */
@@ -95,7 +95,7 @@ export class PsSession {
         dex: this.opts.dex,
         jev: this.opts.jev,
         advisor: this.opts.advisor,
-        pika: this.opts.pika,
+        priors: this.opts.priors,
         memory: this.opts.memory,
         logger: this.opts.logger,
         conn: this.opts.conn,

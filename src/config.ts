@@ -26,9 +26,15 @@ export interface AppConfig {
   sendRqid: boolean;
   logDir: string;
   logLevel: 'debug' | 'info' | 'warn';
+  /** 已停用：Pikalytics 先验默认关闭（决策先验由 pokechamdb 每日快照供应）；仅 JEV_PIKA_ENABLED=1 显式恢复。 */
   pikaEnabled: boolean;
   pikaCutoff: number;
+  /** （仅停用路径使用）Pikalytics 先验缓存目录。 */
   pikaDir: string;
+  /** 决策统计先验（items/abilities/moves 使用率与英文效果说明）的来源目录，由 `npm run chamdb:refresh` 写入。 */
+  chamdbDir: string;
+  /** Pokechamdb 本地缓存的重新同步间隔（小时）。 */
+  chamdbTtlHours: number;
   memoryDir: string;
   reviewModel: string;
   reviewApiKey: string;
@@ -76,9 +82,11 @@ export function loadConfig(
     sendRqid: env.SEND_RQID !== '0',
     logDir: env.LOG_DIR ?? 'logs',
     logLevel: (env.LOG_LEVEL ?? 'info') as AppConfig['logLevel'],
-    pikaEnabled: env.JEV_PIKA_ENABLED !== '0',
+    pikaEnabled: env.JEV_PIKA_ENABLED === '1',
     pikaCutoff: Number(env.JEV_PIKA_CUTOFF ?? 1760),
     pikaDir: env.JEV_PIKA_DIR ?? '.cache/pikalytics',
+    chamdbDir: env.JEV_CHAMDB_DIR ?? '.cache/pokechamdb',
+    chamdbTtlHours: Number(env.JEV_CHAMDB_TTL_HOURS ?? 24),
     memoryDir: env.JEV_MEMORY_DIR ?? '.cache/jev-memory',
     reviewModel: (env.JEV_REVIEW_MODEL ?? '').trim(),
     reviewApiKey: env.JEV_REVIEW_API_KEY?.trim() || mainKey,
@@ -110,6 +118,9 @@ export function validateConfig(cfg: AppConfig, opts: {requireApiKey?: boolean} =
   }
   if (!Number.isSafeInteger(cfg.pikaCutoff) || cfg.pikaCutoff <= 0) {
     throw new Error('JEV_PIKA_CUTOFF 必须是正安全整数');
+  }
+  if (!Number.isFinite(cfg.chamdbTtlHours) || cfg.chamdbTtlHours <= 0) {
+    throw new Error('JEV_CHAMDB_TTL_HOURS 必须是正数（小时）');
   }
   if (cfg.reviewMaxTokens !== undefined && (!Number.isSafeInteger(cfg.reviewMaxTokens) || cfg.reviewMaxTokens <= 0)) {
     throw new Error('JEV_REVIEW_MAX_TOKENS 必须是正安全整数（留空或仅空白表示不限制）');

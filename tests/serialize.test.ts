@@ -4,6 +4,7 @@ import {
 } from '../src/state/serialize.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 import {buildAnalysisContext} from '../src/state/analysis.js';
+import {buildBattleContext} from '../src/state/battle-context.js';
 
 const dex = mkDex();
 
@@ -113,6 +114,48 @@ describe('增强 payload 与渲染', () => {
 });
 
 describe('buildStatePayload', () => {
+  it.each([1, 2, 3] as const)('L%s 携带相同来源的累计摘要和按回合整理的双方历史', level => {
+    const tracker = mkTracker();
+    const request = mkRequest();
+    tracker.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
+    tracker.handleLine('|move|p2a: Victreebel|Sleep Powder|p1b: Chandelure');
+    tracker.handleLine('|turn|2');
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level});
+    const payload = buildStatePayload({dex, request, state: tracker.state, analysis}) as any;
+    expect(payload.battle_context).toEqual(buildBattleContext({state: tracker.state, request}));
+    expect(payload.battle_context.recent_turns[0].events).toHaveLength(2);
+    expect(payload.battle_context.summary.ours.brought_count.confirmed).toBe(4);
+    expect(payload.battle_context.summary.opponent.brought_count.confirmed).toBeNull();
+    expect(payload.sides.opponent.brought_count).toBeNull();
+  });
+  it('兼容 recent_log 仅复用清洗后的事件，聊天及原始 request 不旁路进入 payload', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
+    tracker.handleLine('|c|opponent|INJECT');
+    tracker.state.log.push('|request|{"INJECT":true}', '|html|INJECT');
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.recent_log).toEqual(payload.battle_context?.recent_turns.flatMap((row: any) => row.events).slice(-10));
+    expect(JSON.stringify(payload)).not.toContain('INJECT');
+    expect(payload.recent_log).toContain('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
+  });
+  it('满血首发换下后，即使旧日志被裁剪，主快照与摘要的已见名单也一致', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|switch|p2a: Kingambit|Kingambit, L50|100/100');
+    tracker.state.log = ['|turn|7'];
+    tracker.state.turn = 7;
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.sides.opponent.bench.map((p: any) => p.species)).toContain('Victreebel');
+    expect(payload.sides.opponent.seen_count).toBe(payload.battle_context.summary.opponent.seen_count);
+    expect(payload.sides.opponent.unseen_from_preview.map((p: any) => p.species)).not.toContain('Victreebel');
+  });
+  it('主快照与局内摘要对换下对手的能力等级均不保留过期值', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-boost|p2a: Victreebel|spa|2');
+    tracker.handleLine('|switch|p2a: Kingambit|Kingambit, L50|100/100');
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.sides.opponent.bench.find((p: any) => p.species === 'Victreebel').boosts).toEqual({});
+    expect(payload.battle_context.summary.opponent.pokemon.find((p: any) => p.species === 'Victreebel').boosts).toEqual({});
+  });
   it('包含双方关键信息', () => {
     const payload = buildStatePayload({state: mkTracker().state, request: mkRequest(), dex}) as any;
     expect(payload.turn).toBe(1);
@@ -122,7 +165,7 @@ describe('buildStatePayload', () => {
     expect(payload.sides.ours.bench.map((b: any) => b.species)).toEqual(['Tyranitar', 'Salamence']);
     expect(payload.sides.opponent.active.map((a: any) => a.species)).toEqual(['Victreebel', 'Charizard']);
     expect(payload.sides.opponent.active[1].hp_percent).toBe(92);
-    expect(payload.sides.opponent.brought_count).toBe(4);
+    expect(payload.sides.opponent.brought_count).toBeNull();
     expect(Array.isArray(payload.recent_log)).toBe(true);
   });
 });
@@ -272,17 +315,30 @@ describe('describePreviewCandidate', () => {
     expect(text).toContain('Mega');
     expect(text).toMatch(/best:/);
   });
+  it('传入 likelyMegaFoes 时列出对预期 Mega 形态的超效招式', () => {
+    const request = mkRequest();
+    const text = describePreviewCandidate({
+      dex,
+      pokemon: request.side.pokemon[1], // Chandelure：Heat Wave（火）
+      opponentPreviewSpecies: ['Golisopod'],
+      megaCapable: false,
+      likelyMegaFoes: [{species: 'Golisopod', name: 'Golisopod-Mega', types: ['Bug', 'Steel'], percent: 98.6}],
+    });
+    expect(text).toContain('likely-form coverage: Heat Wave (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x (98.6% Mega-stone prior, type-only)');
+    const none = describePreviewCandidate({dex, pokemon: request.side.pokemon[1], opponentPreviewSpecies: ['Golisopod'], megaCapable: false});
+    expect(none).not.toContain('likely-form coverage');
+  });
 });
 
 import {buildOpponentNotes} from '../src/state/opponent-notes.js';
-import {parsePikaList} from '../src/dex/pikalytics.js';
+import {parsePikaList, pikaToPriors} from '../src/dex/pikalytics.js';
 import type {SpeedControl} from '../src/state/speed-control.js';
 
-const pikaFixture = parsePikaList([{
+const pikaFixture = pikaToPriors(parsePikaList([{
   name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
   abilities: [{ability: 'Chlorophyll', percent: '60'}], items: [{item: 'Focus Sash', percent: '40'}],
   moves: [{move: 'Sludge Bomb', percent: '70'}], team: [], leads: [{pokemon: 'Victreebel', percent: '9.5'}],
-}], '2026-05', 'f');
+}], '2026-05', 'f'));
 
 describe('payload 对手注解注入', () => {
   it('L2 注入 notes 四栏并省略空栏；L1 不注入', () => {
@@ -290,7 +346,7 @@ describe('payload 对手注解注入', () => {
     tracker.handleLine('|-item|p2a: Victreebel|Choice Scarf');
     tracker.handleLine('|move|p2a: Victreebel|Sludge Bomb|p1a: Golisopod');
     const request = mkRequest();
-    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika: pikaFixture});
+    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaFixture});
     const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
     const payload = buildStatePayload({dex, request, state: tracker.state, analysis, opponentNotes: notes}) as any;
     const victreebel = payload.sides.opponent.active[0];
@@ -324,6 +380,31 @@ describe('buildPreviewQuestions 对手首发先验', () => {
     expect(set.questions.lead_1.instructions).toContain('Victreebel 9.5%');
     const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel'], analysis});
     expect(none.questions.lead_1.instructions).not.toContain('lead tendencies');
+  });
+});
+
+import type {PriorMeta} from '../src/dex/priors.js';
+
+describe('buildPreviewQuestions 预期 Mega 形态对位', () => {
+  const golisopodPriors: PriorMeta = {
+    label: 'x',
+    bySpecies: {golisopod: {items: [
+      {name: 'グソクムシャナイト', percent: 98.6, gloss: 'Allows Golisopod to Mega Evolve into Mega Golisopod.', mega: true},
+    ], abilities: [], moves: [], leads: []}},
+  };
+  it('有先验时 slot 描述与引导句包含对 Mega 形态的超效招式；无先验不输出', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = mkRequest();
+    request.teamPreview = true;
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const set = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Golisopod'], analysis, priors: golisopodPriors});
+    const criteria = set.questions.lead_1.criteria as Record<string, string>;
+    expect(criteria.slot_2).toContain('likely-form coverage');
+    expect(criteria.slot_2).toContain('Heat Wave (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x');
+    expect(set.questions.lead_1.instructions).toMatch(/vary your lead pair/);
+    const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Golisopod'], analysis});
+    expect((none.questions.lead_1.criteria as Record<string, string>).slot_2).not.toContain('likely-form coverage');
+    expect(none.questions.lead_1.instructions).not.toContain('likely-form coverage');
   });
 });
 

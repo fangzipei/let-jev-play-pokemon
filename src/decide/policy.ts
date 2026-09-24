@@ -8,7 +8,7 @@ import {buildChooseCommand, validateActions, type ChooseAction} from '../ps/choo
 import type {BattleRequest} from '../state/request.js';
 import {buildOpponentNotes, leadPriorLines} from '../state/opponent-notes.js';
 import {buildStatePayload} from '../state/serialize.js';
-import type {PikaMeta} from '../dex/pikalytics.js';
+import type {PriorMeta} from '../dex/priors.js';
 import type {MemoryData} from '../learn/store.js';
 import type {BattleState} from '../state/tracker.js';
 import {resolveKey} from './answers.js';
@@ -37,7 +37,7 @@ export interface DecisionContext extends FallbackContext {
   /** 每个已完成 API 调用立即记账，即使随后请求被取消也保留已知费用。 */
   onUsage?: (usage: DecisionsUsage, source: 'jev' | 'advisor') => void;
   /** 统计先验与跨局经验（可缺省；仅进程启动期加载一次）。 */
-  pika?: PikaMeta | null;
+  priors?: PriorMeta | null;
   memory?: MemoryData | null;
 }
 
@@ -190,7 +190,7 @@ async function runWithJev(
   const analysis = buildAnalysisContext({dex: ctx.dex, state: ctx.tracker.state, request: ctx.request, level});
   const ourSideId = ctx.tracker.state.ourSideId ?? ctx.request.side.id;
   const opponentNotes = level >= 2
-    ? buildOpponentNotes({state: ctx.tracker.state, ourSideId, pika: ctx.pika, memory: ctx.memory, dex: ctx.dex})
+    ? buildOpponentNotes({state: ctx.tracker.state, ourSideId, priors: ctx.priors, memory: ctx.memory, dex: ctx.dex})
     : undefined;
   const state = structuredClone(buildStatePayload({state: ctx.tracker.state, request: ctx.request, dex: ctx.dex, analysis, opponentNotes}));
   // 在第一次 await 之前固定本次请求的状态和合法选项；advisor 与 jev 使用同一份快照。
@@ -199,7 +199,8 @@ async function runWithJev(
   let questions: Record<string, Question> = kind === 'team-preview' ? buildPreviewQuestions({
     dex: ctx.dex, request: ctx.request, analysis,
     opponentPreviewSpecies: opponentSpecies,
-    opponentLeadPriors: leadPriorLines(ctx.pika, opponentSpecies),
+    opponentLeadPriors: leadPriorLines(ctx.priors, opponentSpecies),
+    priors: ctx.priors,
   }).questions : Object.fromEntries(plans.map(plan => [plan.questionName, plan.question]));
   if (!Object.keys(questions).length) throw new Error(`没有可提交给 jev 的 ${kind} 问题`);
   trace.state = state;

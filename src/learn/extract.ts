@@ -52,7 +52,8 @@ export function extractObservation(
   let winner: string | null = null;
   let started = false;
 
-  const ensure = (name: string, species: string): RevealedSpecies => {
+  // 空物种仅用于暂存未知身份的观察，等待真实详情补全；昵称不能作为物种依据。
+  const ensure = (name: string, species = ''): RevealedSpecies => {
     let record = revealed.get(name);
     if (!record) {
       record = {species, moves: [], itemConsumed: false, led: false};
@@ -84,9 +85,9 @@ export function extractObservation(
       started = true;
       continue;
     }
-    if (line.type === 'detailschange' || line.type === 'formechange') {
+    if (line.type === 'detailschange' || line.type === '-formechange' || line.type === 'formechange') {
       const ident = a0 ? parseIdent(a0) : null;
-      if (ident?.side === oppSide && a1) ensure(ident.name, '').species = parseDetails(a1).species;
+      if (ident?.side === oppSide && a1) ensure(ident.name, parseDetails(a1).species);
       continue;
     }
     const ident = a0 ? parseIdent(a0) : null;
@@ -94,24 +95,27 @@ export function extractObservation(
     switch (line.type) {
       case 'switch':
       case 'drag': {
-        const record = ensure(ident.name, a1 ? parseDetails(a1).species : ident.name);
+        const record = ensure(ident.name, a1 ? parseDetails(a1).species : '');
         if (!started) record.led = true;
         break;
       }
-      case 'move':
-        if (a1 && !ensure(ident.name, ident.name).moves.includes(a1)) ensure(ident.name, ident.name).moves.push(a1);
+      case 'move': {
+        if (!a1) break;
+        const record = ensure(ident.name);
+        if (!record.moves.includes(a1)) record.moves.push(a1);
         break;
+      }
       case '-item':
-        if (a1) ensure(ident.name, ident.name).item = a1;
+        if (a1) ensure(ident.name).item = a1;
         break;
       case '-enditem': {
-        const record = ensure(ident.name, ident.name);
+        const record = ensure(ident.name);
         if (a1) record.item = a1;
         record.itemConsumed = true;
         break;
       }
       case '-ability':
-        if (a1 && !['none', 'hidden'].includes(a1)) ensure(ident.name, ident.name).ability = a1;
+        if (a1 && !['none', 'hidden'].includes(a1)) ensure(ident.name).ability = a1;
         break;
       case '-mega':
         // 仅登记发生 Mega 的形态标识（-mega 行 a1）；不覆盖揭示记录的物种，形态变更由 detailschange 负责
@@ -130,6 +134,6 @@ export function extractObservation(
     ourSpecies,
     opponentSpecies,
     opponentMegaSpecies: [...megaSpecies],
-    revealed: [...revealed.values()],
+    revealed: [...revealed.values()].filter(record => record.species !== ''),
   };
 }

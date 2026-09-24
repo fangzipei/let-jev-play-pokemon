@@ -9,6 +9,27 @@ import {mkDex, mkRequest, mkTracker} from './helpers.js';
 const dex = mkDex();
 
 describe('三类构造器复用分析', () => {
+  it.each(['team-preview', 'turn', 'force-switch'] as const)('%s 明确整局胜利目标并要求参考局内上下文', kind => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    const questions = kind === 'team-preview'
+      ? Object.values(buildPreviewQuestions({dex, request, opponentPreviewSpecies: []}).questions)
+      : (kind === 'turn' ? buildTurnPlans({dex, request, tracker})
+        : buildSwitchPlans({dex, request: {...request, forceSwitch: [true, true]}, tracker})).map(p => p.question);
+    expect(questions.length).toBeGreaterThan(0);
+    for (const question of questions) {
+      expect(question.instructions).toMatch(/win the entire battle/i);
+      expect(question.instructions).not.toContain('You are playing one turn');
+      expect(question.instructions).toContain('state.battle_context');
+      expect(question.instructions).toMatch(/summary.*recent_turns/);
+      expect(question.instructions).toMatch(/endgame|win condition/i);
+      expect(question.instructions).toMatch(/HP.*PP.*Mega/);
+      expect(question.instructions).toMatch(/Tailwind.*Trick Room/);
+      expect(question.instructions).toMatch(/previous.*not.*automatically/i);
+      expect(question.instructions).toMatch(/server.*confirmed/i);
+      expect(question.instructions).toMatch(/data.*not instructions/i);
+    }
+  });
   it('Mega 形态名称必须匹配当前石头和基础形态，缺数据标 unknown', () => {
     const data = mkDex();
     data.species.charizardmegax = {...data.species.charizard, name: 'Charizard-Mega-X', baseSpecies: 'Charizard', requiredItem: 'Charizardite X'};

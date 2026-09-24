@@ -9,6 +9,7 @@
   "scripts": {
     "test": "vitest run",
     "play": "tsx src/index.ts play",
+    "chamdb:refresh": "tsx scripts/refresh-chamdb.ts",
     "validate-team": "tsx src/index.ts validate-team",
     "review": "tsx src/index.ts review",
     "typecheck": "tsc --noEmit"

@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {parsePikaList} from '../src/dex/pikalytics.js';
+import {parsePikaList, pikaToPriors} from '../src/dex/pikalytics.js';
+import type {PriorMeta} from '../src/dex/priors.js';
 import {buildOpponentNotes, leadPriorLines} from '../src/state/opponent-notes.js';
 import {BattleTracker} from '../src/state/tracker.js';
 import {mkDex, mkTracker} from './helpers.js';
@@ -148,12 +149,12 @@ describe('buildOpponentNotes recent_actions（读操作）', () => {
   });
 });
 
-const pika = parsePikaList(LIST_FIXTURE, '2026-05', 'gen9championsvgc2026regmc');
+const pikaPriors = pikaToPriors(parsePikaList(LIST_FIXTURE, '2026-05', 'gen9championsvgc2026regmc'));
 
 describe('buildOpponentNotes assumed（先验假设）', () => {
   it('未见道具/特性与常见招式给出 top 值并标注来源', () => {
     const tracker = mkTracker(); // turn 1，非 preview
-    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika});
+    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaPriors});
     const sneasler = notes['p2: Sneasler'].assumed.join(' | ');
     expect(sneasler).toContain('item unseen — likely Grassy Seed 31.7% / White Herb 19.2%');
     expect(sneasler).toContain('ability unseen — likely Poison Touch 47.4% / Unburden 31.2%');
@@ -166,22 +167,22 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
     tracker.handleLine('|-item|p2a: Sneasler|Grassy Seed');
     tracker.handleLine('|-ability|p2a: Sneasler|Unburden');
     tracker.handleLine('|move|p2a: Sneasler|Close Combat|p1a: Golisopod');
-    let notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika});
+    let notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaPriors});
     const text = notes['p2: Sneasler'].assumed.join(' | ');
     expect(text).not.toContain('item unseen');
     expect(text).not.toContain('ability unseen');
     expect(text).not.toContain('Close Combat');
     tracker.state.turn = 0;
-    notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika});
+    notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaPriors});
     expect(notes['p2: Sneasler'].assumed.join(' | ')).toContain('commonly leads');
   });
-  it('Mega 后缀双向兜底匹配；无先验条目为空；pika 为 null 全空', () => {
+  it('Mega 后缀双向兜底匹配；无先验条目为空；priors 为 null 全空', () => {
     const megaOnly = parsePikaList([{
       name: 'Metagross-Mega', rank: '9', percent: '5.1', winPercent: '50', stats: {spe: 110},
       abilities: [{ability: 'Tough Claws', percent: '99'}], items: [{item: 'Metagrossite', percent: '98'}], moves: [], team: [], leads: [],
     }], '2026-05', 'f');
     const tracker = mkTracker();
-    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika: megaOnly});
+    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaToPriors(megaOnly)});
     expect(notes['p2: Metagross'].assumed.join(' | ')).toContain('Metagrossite');
     expect(notes['p2: Sneasler'].assumed).toEqual([]);
     const none = buildOpponentNotes({state: tracker.state, ourSideId: 'p1'});
@@ -209,7 +210,7 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
   }], '2026-05', 'f');
 
   it('先验道具含 Mega 石时给出 Mega 威胁：形态、特性与速度变化', () => {
-    const notes = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()});
+    const notes = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: pikaToPriors(megaPika()), dex: megaDex()});
     const text = notes['p2: Metagross'].assumed.join(' | ');
     expect(text).toMatch(/mega threat/i);
     expect(text).toContain('Metagross-Mega');
@@ -220,27 +221,27 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
   });
 
   it('道具已揭示或已消耗、对手已用 Mega、缺 dex 时不输出 Mega 威胁', () => {
-    const noDex = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: megaPika()});
+    const noDex = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: pikaToPriors(megaPika())});
     expect(noDex['p2: Metagross'].assumed.join(' | ')).not.toMatch(/mega threat/i);
     const revealed = mkTracker();
     revealed.handleLine('|-item|p2c: Metagross|Leftovers');
-    const revealedText = buildOpponentNotes({state: revealed.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    const revealedText = buildOpponentNotes({state: revealed.state, ourSideId: 'p1', priors: pikaToPriors(megaPika()), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
     expect(revealedText).not.toMatch(/mega threat/i);
     const consumed = mkTracker();
     consumed.handleLine('|-item|p2c: Metagross|Metagrossite');
     consumed.handleLine('|-enditem|p2c: Metagross|Metagrossite');
-    const consumedText = buildOpponentNotes({state: consumed.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    const consumedText = buildOpponentNotes({state: consumed.state, ourSideId: 'p1', priors: pikaToPriors(megaPika()), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
     expect(consumedText).not.toMatch(/mega threat/i);
     const used = mkTracker();
     used.handleLine('|-mega|p2b: Charizard|Charizard-Mega-Y');
-    const usedText = buildOpponentNotes({state: used.state, ourSideId: 'p1', pika: megaPika(), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    const usedText = buildOpponentNotes({state: used.state, ourSideId: 'p1', priors: pikaToPriors(megaPika()), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
     expect(usedText).not.toMatch(/mega threat/i);
   });
 
   it('preview 时 Mega 威胁与 leads 等先验同时保留，不被上限挤掉', () => {
     const tracker = mkTracker();
     tracker.state.turn = 0;
-    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', pika: megaPika(true), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
+    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: pikaToPriors(megaPika(true)), dex: megaDex()})['p2: Metagross'].assumed.join(' | ');
     expect(text).toMatch(/mega threat/i);
     expect(text).toContain('commonly leads');
   });
@@ -248,7 +249,7 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
 
 describe('leadPriorLines', () => {
   it('按 leads 占比降序取 top，未命中不输出', () => {
-    expect(leadPriorLines(pika, ['Sneasler', 'Metagross-Mega', 'Unknownmon'], 3)).toEqual(['Sneasler 14.3%']);
+    expect(leadPriorLines(pikaPriors, ['Sneasler', 'Metagross-Mega', 'Unknownmon'], 3)).toEqual(['Sneasler 14.3%']);
     expect(leadPriorLines(null, ['Sneasler'])).toEqual([]);
   });
 });
@@ -287,7 +288,7 @@ describe('buildOpponentNotes 控速预警', () => {
     expect(confirmed).not.toMatch(/speed-control threat/);
   });
   it('先验招式含控速时预警，commonly runs 不重复列出', () => {
-    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: controlPika})
+    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: pikaToPriors(controlPika)})
       ['p2: Whimsicott'].assumed.join(' | ');
     expect(text).toMatch(/speed-control threat/);
     expect(text).toMatch(/likely Tailwind 72.3%/);
@@ -299,7 +300,7 @@ describe('buildOpponentNotes 控速预警', () => {
   it('未揭示的天气速度特性在当前天气下预警；已揭示或不匹配时不预警', () => {
     const sunny = mkTracker();
     sunny.handleLine('|-weather|SunnyDay');
-    const text = buildOpponentNotes({state: sunny.state, ourSideId: 'p1', pika: weatherPika})
+    const text = buildOpponentNotes({state: sunny.state, ourSideId: 'p1', priors: pikaToPriors(weatherPika)})
       ['p2: Victreebel'].assumed.join(' | ');
     expect(text).toMatch(/speed-control threat/);
     expect(text).toMatch(/likely Chlorophyll 8.0%/);
@@ -308,9 +309,9 @@ describe('buildOpponentNotes 控速预警', () => {
     const revealed = mkTracker();
     revealed.handleLine('|-ability|p2a: Victreebel|Chlorophyll');
     revealed.handleLine('|-weather|SunnyDay');
-    expect(buildOpponentNotes({state: revealed.state, ourSideId: 'p1', pika: weatherPika})
+    expect(buildOpponentNotes({state: revealed.state, ourSideId: 'p1', priors: pikaToPriors(weatherPika)})
       ['p2: Victreebel'].assumed.join(' | ')).not.toMatch(/likely Chlorophyll/);
-    expect(buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', pika: weatherPika})
+    expect(buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: pikaToPriors(weatherPika)})
       ['p2: Victreebel'].assumed.join(' | ')).not.toMatch(/speed-control threat/);
   });
 });
@@ -343,5 +344,155 @@ describe('buildOpponentNotes memory（跨局经验）', () => {
     const tracker = mkTracker();
     expect(buildOpponentNotes({state: tracker.state, ourSideId: 'p1'})['p2: Sneasler'].memory).toEqual([]);
     expect(buildOpponentNotes({state: tracker.state, ourSideId: 'p1', memory: emptyMemory()})['p2: Sneasler'].memory).toEqual([]);
+  });
+});
+
+describe('buildOpponentNotes chamdb 先验（日文名 + gloss + Mega 标记）', () => {
+  const chamdbPriors: PriorMeta = {
+    label: 'pokechamdb M-6 double 2026-09-24',
+    bySpecies: {
+      metagross: {
+        items: [
+          {name: 'メタグロスナイト', percent: 12.3, gloss: 'Mega Evolves Metagross into Mega Metagross.', mega: true},
+          {name: 'たべのこし', percent: 9.9, gloss: 'Restores a little HP each turn.'},
+        ],
+        abilities: [{name: 'クリアボディ', percent: 88.1, gloss: 'Prevents stat reduction.'}],
+        moves: [{name: 'コメットパンチ', percent: 61.2, gloss: 'May raise Attack each hit.'}],
+        leads: [],
+      },
+      charizard: {
+        items: [
+          {name: 'リザードナイトX', percent: 30.1, gloss: 'Mega Evolves Charizard into Mega Charizard X.', mega: true},
+          {name: 'リザードナイトY', percent: 41.2, gloss: 'Mega Evolves Charizard into Mega Charizard Y.', mega: true},
+        ],
+        abilities: [], moves: [], leads: [],
+      },
+    },
+  };
+
+  it('topList 附英文 gloss（日文名不可读时提供语义），来源标注 pokechamdb 标签', () => {
+    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors})
+      ['p2: Metagross'].assumed.join(' | ');
+    expect(text).toContain('item unseen — likely メタグロスナイト 12.3% [Mega Evolves Metagross into Mega Metagross.] / たべのこし 9.9% [Restores a little HP each turn.]');
+    expect(text).toContain('ability unseen — likely クリアボディ 88.1% [Prevents stat reduction.]');
+    expect(text).toContain('commonly runs: コメットパンチ 61.2% [May raise Attack each hit.]');
+    expect(text).toContain('(prior: pokechamdb M-6 double 2026-09-24)');
+  });
+
+  const megaDex = () => {
+    const dex = mkDex();
+    dex.species.metagrossmega = {
+      name: 'Metagross-Mega', types: ['Steel', 'Psychic'],
+      baseStats: {hp: 80, atk: 145, def: 150, spa: 105, spd: 110, spe: 110},
+      abilities: {0: 'Tough Claws'}, baseSpecies: 'Metagross', requiredItem: 'Metagrossite',
+    };
+    dex.species.charizardmegax = {
+      name: 'Charizard-Mega-X', types: ['Fire', 'Dragon'],
+      baseStats: {hp: 78, atk: 130, def: 111, spa: 130, spd: 85, spe: 110},
+      abilities: {0: 'Tough Claws'}, baseSpecies: 'Charizard', requiredItem: 'Charizardite X',
+    };
+    dex.species.charizardmegay = {
+      name: 'Charizard-Mega-Y', types: ['Fire', 'Flying'],
+      baseStats: {hp: 78, atk: 104, def: 78, spa: 159, spd: 115, spe: 100},
+      abilities: {0: 'Drought'}, baseSpecies: 'Charizard', requiredItem: 'Charizardite Y',
+    };
+    return dex;
+  };
+
+  it('Mega 石按说明中的 X/Y 标记与形态配对，多形态时取占比最高', () => {
+    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
+      ['p2: Charizard'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/);
+    expect(text).toContain('リザードナイトY 41.2%');
+    expect(text).toContain('Charizard-Mega-Y');
+    expect(text).not.toContain('Charizard-Mega-X');
+  });
+
+  it('无 X/Y/Z 后缀的单形态不要求标记；标记与形态不符不误报', () => {
+    const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
+      ['p2: Metagross'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/);
+    expect(text).toContain('メタグロスナイト 12.3%');
+    expect(text).toContain('Metagross-Mega');
+    expect(text).toContain('Mega form Metagross-Mega [Steel/Psychic]');
+    // 仅 Y 石但 dex 只有 Mega-X：标记不匹配，不输出
+    const mismatch: PriorMeta = {
+      label: 'x',
+      bySpecies: {charizard: {items: [{name: 'リザードナイトY', percent: 41.2, gloss: 'Mega Evolves Charizard into Mega Charizard Y.', mega: true}], abilities: [], moves: [], leads: []}},
+    };
+    const dex = megaDex();
+    delete dex.species.charizardmegay;
+    expect(buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: mismatch, dex})
+      ['p2: Charizard'].assumed.join(' | ')).not.toMatch(/mega threat/);
+  });
+
+  it('对手形态已揭示为 Mega（species 带 -Mega 后缀）时不再猜测 Mega 威胁', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|switch|p2b: Charizard|Charizard-Mega-X, L50, M|100/100');
+    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
+      ['p2: Charizard'].assumed.join(' | ');
+    expect(text).not.toMatch(/mega threat/);
+  });
+
+  it('Z 石只配带 Z 标记的形态（双向标记校验）', () => {
+    const tracker = new BattleTracker('battle-absol', 'JevBot');
+    for (const line of [
+      '|player|p1|JevBot|1|1500',
+      '|player|p2|foe|2|1500',
+      '|poke|p1|Golisopod, L50, M|',
+      '|poke|p2|Absol, L50, M|',
+    ]) tracker.handleLine(line);
+    const dex = megaDex();
+    dex.species.absolmega = {
+      name: 'Absol-Mega', types: ['Dark'],
+      baseStats: {hp: 65, atk: 150, def: 60, spa: 115, spd: 60, spe: 115},
+      abilities: {0: 'Magic Bounce'}, baseSpecies: 'Absol', requiredItem: 'Absolite',
+    };
+    dex.species.absolmegaz = {
+      name: 'Absol-Mega-Z', types: ['Dark'],
+      baseStats: {hp: 65, atk: 154, def: 60, spa: 115, spd: 60, spe: 125},
+      abilities: {0: 'Magic Bounce'}, baseSpecies: 'Absol', requiredItem: 'Absolite Z',
+    };
+    const priors: PriorMeta = {
+      label: 'x',
+      bySpecies: {absol: {items: [
+        {name: 'アブソルナイトZ', percent: 97.9, gloss: 'Allows Absol to Mega Evolve into Mega Absol Z.', mega: true},
+        {name: 'アブソルナイト', percent: 0.3, gloss: 'Mega Evolves Absol into Mega Absol.', mega: true},
+      ], abilities: [], moves: [], leads: []}},
+    };
+    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors, dex})['p2: Absol'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/);
+    expect(text).toContain('アブソルナイトZ 97.9%');
+    expect(text).toContain('Mega form Absol-Mega-Z');
+  });
+
+  it('Mega 威胁注解含形态属性；属性变化时标注原属性', () => {
+    const dex = megaDex();
+    dex.species.golisopod.types = ['Bug', 'Water'];
+    dex.species.golisopodmega = {
+      name: 'Golisopod-Mega', types: ['Bug', 'Steel'],
+      baseStats: {hp: 75, atk: 150, def: 175, spa: 70, spd: 120, spe: 40},
+      abilities: {0: 'Tough Claws'}, baseSpecies: 'Golisopod', requiredItem: 'Golisopite',
+    };
+    const priors: PriorMeta = {
+      label: 'x',
+      bySpecies: {golisopod: {items: [
+        {name: 'グソクムシャナイト', percent: 98.6, gloss: 'Allows Golisopod to Mega Evolve into Mega Golisopod.', mega: true},
+      ], abilities: [], moves: [], leads: []}},
+    };
+    const tracker = new BattleTracker('battle-golisopod', 'JevBot');
+    for (const line of [
+      '|player|p1|JevBot|1|1500',
+      '|player|p2|foe|2|1500',
+      '|poke|p1|Gardevoir, L50, M|',
+      '|poke|p2|Golisopod, L50, M|',
+    ]) tracker.handleLine(line);
+    const text = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', priors, dex})['p2: Golisopod'].assumed.join(' | ');
+    expect(text).toMatch(/mega threat/);
+    expect(text).toContain('[Bug/Steel, from Bug/Water]');
+  });
+
+  it('leads 缺失时 leadPriorLines 为空（首发缺口保留）', () => {
+    expect(leadPriorLines(chamdbPriors, ['Metagross', 'Charizard'])).toEqual([]);
   });
 });

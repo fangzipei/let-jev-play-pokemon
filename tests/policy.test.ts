@@ -1,7 +1,7 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {AdvisorClient} from '../src/jev/advisor.js';
 import {decideChoice, type DecisionContext} from '../src/decide/policy.js';
-import {parsePikaList, type PikaMeta} from '../src/dex/pikalytics.js';
+import {parsePikaList, pikaToPriors, type PikaMeta} from '../src/dex/pikalytics.js';
 import type {DecideInput, JevClient} from '../src/jev/client.js';
 import type {Answer} from '../src/jev/types.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
@@ -42,6 +42,60 @@ function mkCtx(opts: {
   };
 }
 
+describe('整局上下文接线', () => {
+  it.each([1, 2, 3] as const)('L%s 连续请求携带已执行双方历史，不把本地选择当作成功动作', async level => {
+    const captured: any[] = [];
+    const entries: any[] = [];
+    const ctx = mkCtx({logger: {...nullLogger, decision: (_id, e) => entries.push(e)}, jev: mkJev(input => {
+      captured.push(input);
+      return {action_slot_1: {type: 'choice', choice: 'move_1_foe_a'}};
+    })});
+    ctx.cfg.jevContextLevel = level;
+    await decideChoice(ctx);
+    ctx.tracker.handleLine('|cant|p1a: Golisopod|flinch');
+    ctx.tracker.handleLine('|move|p2a: Victreebel|Sleep Powder|p1b: Chandelure');
+    ctx.tracker.handleLine('|-status|p1b: Chandelure|slp');
+    ctx.tracker.handleLine('|turn|2');
+    ctx.request = {...ctx.request, rqid: 8};
+    await decideChoice(ctx);
+    expect(captured).toHaveLength(2);
+    expect(captured[1].state.battle_context).toBeDefined();
+    const context = captured[1].state.battle_context;
+    expect(context.turn).toBe(2);
+    expect(context.recent_turns[0].events).toEqual([
+      '|cant|p1a: Golisopod|flinch', '|move|p2a: Victreebel|Sleep Powder|p1b: Chandelure',
+      '|-status|p1b: Chandelure|slp',
+    ]);
+    expect(JSON.stringify(context.recent_turns)).not.toContain('Iron Head');
+    expect(captured[0].state.battle_context.turn).toBe(1);
+    expect(entries[1].state.battle_context).toEqual(context);
+  });
+
+  it('L2 与 L3 局内上下文同源，advisor 等待期间新增事件不污染当前快照', async () => {
+    const payloads: any[] = [];
+    const ctx = mkCtx({jev: mkJev(input => { payloads.push(structuredClone(input)); return {}; })});
+    ctx.cfg.jevContextLevel = 2;
+    await decideChoice(ctx);
+    let advisorSnapshot: any;
+    ctx.cfg.jevContextLevel = 3;
+    ctx.advisor = {analyze: async input => {
+      advisorSnapshot = structuredClone(input.state);
+      ctx.tracker.handleLine('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
+      ctx.tracker.handleLine('|turn|2');
+      return {text: 'Keep the endgame in mind.', model: 'test', latencyMs: 1, usage: {}};
+    }};
+    await decideChoice(ctx);
+    expect(advisorSnapshot.battle_context).toBeDefined();
+    expect(advisorSnapshot).toEqual(payloads[0].state);
+    const {advisor_analysis, ...state} = payloads[1].state;
+    expect(state).toEqual(payloads[0].state);
+    expect(advisor_analysis.text).toContain('endgame');
+    expect(state.battle_context.turn).toBe(1);
+    expect(JSON.stringify(state.battle_context.recent_turns)).not.toContain('Heat Wave');
+    expect(ctx.tracker.state.turn).toBe(2);
+  });
+});
+
 describe('三级上下文与辅助分析接线', () => {
   afterEach(() => vi.useRealTimers());
   const advice = {text: 'RECOMMEND: consider the sand pair against this preview.', model: 'test/advisor', latencyMs: 12, usage: {cost: 0.004, input_tokens: 300, output_tokens: 30}};
@@ -58,6 +112,8 @@ describe('三级上下文与辅助分析接线', () => {
       expect(state.sides.ours.preview[0].stats).toBeDefined();
       expect(state.sides.ours.team_notes.length).toBeGreaterThan(0);
       expect(state.advisor_analysis).toBeUndefined();
+      expect(state.battle_context).toMatchObject({phase: kind, turn: 1});
+      expect(Object.values(input.questions).every(q => q.instructions.includes('win the entire battle'))).toBe(true);
       return advice;
     });
     const entries: any[] = [];
@@ -388,24 +444,24 @@ describe('decideChoice - force switch', () => {
 });
 
 describe('对手注解与经验注入接线', () => {
-  const pika = parsePikaList([{
+  const priors = pikaToPriors(parsePikaList([{
     name: 'Victreebel', rank: '5', percent: '10', winPercent: '50', stats: {spe: 70},
     abilities: [{ability: 'Chlorophyll', percent: '60'}], items: [{item: 'Focus Sash', percent: '40'}],
     moves: [{move: 'Sludge Bomb', percent: '70'}], team: [], leads: [],
-  }], '2026-05', 'f') as PikaMeta;
+  }], '2026-05', 'f') as PikaMeta);
 
-  it('L2 注入对手 notes；L1 不注入；pika/memory 缺省时仍给 confirmed', async () => {
+  it('L2 注入对手 notes；L1 不注入；priors/memory 缺省时仍给 confirmed', async () => {
     let captured: any;
     const ctx = mkCtx({jev: mkJev(input => {captured = input.state; return {};})});
     ctx.cfg.jevContextLevel = 2;
-    ctx.pika = pika;
+    ctx.priors = priors;
     await decideChoice(ctx);
     expect(captured.sides.opponent.active[0].notes.assumed.join(' ')).toContain('Chlorophyll');
 
     let l1: any;
     const ctxL1 = mkCtx({jev: mkJev(input => {l1 = input.state; return {};})});
     ctxL1.cfg.jevContextLevel = 1;
-    ctxL1.pika = pika;
+    ctxL1.priors = priors;
     await decideChoice(ctxL1);
     expect(l1.sides.opponent.active[0]).not.toHaveProperty('notes');
 
@@ -423,10 +479,10 @@ describe('对手注解与经验注入接线', () => {
     let captured: any;
     const ctx = mkCtx({request, jev: mkJev(input => {captured = input.questions; return {};})});
     ctx.cfg.jevContextLevel = 2;
-    ctx.pika = parsePikaList([{
+    ctx.priors = pikaToPriors(parsePikaList([{
       name: 'Sneasler', rank: '2', percent: '30', winPercent: '50', stats: {spe: 120},
       abilities: [], items: [], moves: [], team: [], leads: [{pokemon: 'Sneasler', percent: '14.3'}],
-    }], '2026-05', 'f');
+    }], '2026-05', 'f'));
     await decideChoice(ctx);
     expect(captured.lead_1.instructions).toContain('Sneasler 14.3%');
   });

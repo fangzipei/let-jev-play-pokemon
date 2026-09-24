@@ -2,6 +2,7 @@ import {canMegaWith, megaFormsOf, speciesTypes, type DexData} from '../dex/index
 import {effectiveness, estimateDamagePercent, knownEffectiveness} from './calc.js';
 import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OurSpeed, type TeamThreat} from './analysis.js';
 import type {OpponentNoteSet} from './opponent-notes.js';
+import {buildBattleContext, seenInBattle} from './battle-context.js';
 import {toId} from './protocol.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import {speedControlOf, turnsPhrase, type SpeedControl} from './speed-control.js';
@@ -34,15 +35,6 @@ export function opponentActives(dex: DexData, state: BattleState): OpponentActiv
       status: p.fainted ? 'fnt' : p.status,
       revealedMoves: p.revealedMoves,
     }));
-}
-
-function seenInBattle(p: PokemonState, state: BattleState): boolean {
-  if (p.activePos >= 0 || p.fainted || p.revealedMoves.length || p.item !== undefined || p.ability !== undefined ||
-      p.consumedItem || p.hpPercent !== 100 || p.status || p.volatiles.length) return true;
-  return state.log.some(line => {
-    const match = /^\|(switch|drag|replace)\|(p\d)[a-z]?:\s*([^|]+)\|/.exec(line);
-    return match && `${match[2]}: ${match[3]}` === p.ident;
-  });
 }
 
 function speedFields(speed: OurSpeed | undefined) {
@@ -81,7 +73,8 @@ export interface SerializeInput {
 }
 
 export function buildStatePayload({state, request, dex, analysis, opponentNotes}: SerializeInput): Record<string, unknown> {
-  const ourSideId = state.ourSideId ?? request.side.id;
+  const battleContext = buildBattleContext({state, request});
+  const ourSideId = request.side.id;
   const ourSideState = state.sides[ourSideId];
   const oppSideState = state.sides[ourSideId === 'p1' ? 'p2' : 'p1'];
   const active = activeEntries(request);
@@ -108,7 +101,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     ...(analysis && analysis.level >= 2 ? {team_notes: analysis.teamNotes} : {}),
   };
   const opponentPokemon = (p: PokemonState) => {
-    const seen = seenInBattle(p, state);
+    const seen = seenInBattle(p);
     const speed = analysis?.oppSpeedEstimates.find(s => s.ident === p.ident);
     const noteSet = opponentNotes && analysis && analysis.level >= 2 ? opponentNotes[p.ident] : undefined;
     const notes = noteSet
@@ -117,7 +110,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     return {
       ident: p.ident, species: p.species, active_position: p.activePos, seen_in_battle: seen,
       hp_percent: seen ? p.hpPercent : null, status: seen ? p.status : null,
-      types: speciesTypes(dex, p.species), boosts: p.boosts, revealed_moves: p.revealedMoves,
+      types: speciesTypes(dex, p.species), boosts: p.activePos >= 0 && !p.fainted ? p.boosts : {}, revealed_moves: p.revealedMoves,
       item_revealed: p.consumedItem ? null : p.item ?? null, ability_revealed: p.ability ?? null,
       item_consumed: p.consumedItem ?? false, volatiles: p.volatiles, single_turn: p.singleTurn,
       ...(analysis ? {base_speed: speed?.baseSpeed ?? null, speed: null, speed_notes: speed?.notes ?? ['unknown'],
@@ -130,11 +123,12 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
   };
   const opponents = oppSideState?.pokemon ?? [];
   const opponent = {
-    side_conditions: oppSideState?.sideConditions ?? [], brought_count: oppSideState?.teamSize ?? 4,
-    seen_count: opponents.filter(p => seenInBattle(p, state)).length,
+    side_conditions: oppSideState?.sideConditions ?? [],
+    brought_count: battleContext.summary.opponent.brought_count.confirmed,
+    seen_count: opponents.filter(p => seenInBattle(p)).length,
     active: opponents.filter(p => p.activePos >= 0).sort((a, b) => a.activePos - b.activePos).map(opponentPokemon),
-    bench: opponents.filter(p => p.activePos < 0 && seenInBattle(p, state)).map(opponentPokemon),
-    unseen_from_preview: opponents.filter(p => !seenInBattle(p, state)).map(p => ({species: p.species, types: speciesTypes(dex, p.species)})),
+    bench: opponents.filter(p => p.activePos < 0 && seenInBattle(p)).map(opponentPokemon),
+    unseen_from_preview: opponents.filter(p => !seenInBattle(p)).map(p => ({species: p.species, types: speciesTypes(dex, p.species)})),
     ...(analysis ? {preview: opponents.map(opponentPokemon)} : {}),
   };
 
@@ -147,7 +141,9 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     our_side_conditions: ourSideState?.sideConditions ?? [],
     speed_control: speedControlOf(state, ourSideId),
     sides: {ours, opponent},
-    recent_log: state.log.slice(-10),
+    battle_context: battleContext,
+    // 兼容旧消费者，但不再将聊天、原始 request 等噪声旁路送入模型。
+    recent_log: battleContext.recent_turns.flatMap(row => row.events).slice(-10),
     ...(analysis ? {analysis_notes: `${DAMAGE_CAVEAT}; potential STAB is type-only, not revealed moves; opponent actual speed and move order unknown`} : {}),
   };
 }
@@ -312,6 +308,14 @@ export function describeSwitchOption(input: {
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot)].filter(Boolean).join('; ');
 }
 
+/** 先验推断的对手预期 Mega 形态（preview 对位行用） */
+export interface LikelyMegaFoe {
+  species: string;
+  name: string;
+  types: string[];
+  percent: number;
+}
+
 export function describePreviewCandidate(input: {
   dex: DexData;
   pokemon: RequestPokemon;
@@ -319,6 +323,7 @@ export function describePreviewCandidate(input: {
   megaCapable: boolean;
   analysis?: AnalysisContext;
   teamSlot?: number;
+  likelyMegaFoes?: LikelyMegaFoe[];
 }): string {
   const species = speciesOf(input.pokemon);
   const types = speciesTypes(input.dex, species);
@@ -343,11 +348,23 @@ export function describePreviewCandidate(input: {
       bestName = mv.name;
     }
   }
+  const coverage: string[] = [];
+  for (const foe of input.likelyMegaFoes ?? []) {
+    let bestHit: {name: string; type: string; multiplier: number} | null = null;
+    for (const id of input.pokemon.moves ?? []) {
+      const mv = input.dex.moves[toId(id)];
+      if (!mv || !mv.basePower) continue;
+      const mult = knownEffectiveness(input.dex, mv.type, foe.types);
+      if (mult !== null && mult > 1 && (!bestHit || mult > bestHit.multiplier)) bestHit = {name: mv.name, type: mv.type, multiplier: mult};
+    }
+    if (bestHit) coverage.push(`${bestHit.name} (${bestHit.type}) hits likely ${foe.name} [${foe.types.join('/')}] ${bestHit.multiplier}x (${foe.percent.toFixed(1)}% Mega-stone prior, type-only)`);
+  }
   const parts = [
     `${species} [${types.join('/') || '?'}]`,
     `moves: ${moveNames.join(', ') || '?'}`,
     input.megaCapable ? "can Mega Evolve (uses the team's only Mega slot)" : '',
     bestCount > 0 ? `best: ${bestName} hits ${bestCount}/${input.analysis?.previewFoes.length ?? input.opponentPreviewSpecies.length} foes super effectively (type-only)` : '',
+    ...(coverage.length ? [`likely-form coverage: ${coverage.slice(0, 2).join('; ')}`] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot),
   ];
   return parts.filter(Boolean).join('; ');

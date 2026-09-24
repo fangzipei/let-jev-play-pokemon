@@ -9,6 +9,7 @@ import {
 import {describeMoveOption, describeSwitchOption, opponentActives, type OpponentActive} from '../state/serialize.js';
 import {speedControlOf, speedControlText} from '../state/speed-control.js';
 import type {BattleTracker} from '../state/tracker.js';
+import {BATTLE_GOAL} from './battle-goal.js';
 
 export interface SlotMoveAction {
   kind: 'move';
@@ -42,8 +43,8 @@ export interface SlotQuestionPlan {
   question: ChoiceQuestion;
 }
 
-const TURN_INTRO =
-  'You are playing one turn of a doubles (VGC-style) battle. For the given slot you must pick exactly ONE action. ' +
+const TURN_INTRO = BATTLE_GOAL +
+  'For the given slot you must pick exactly ONE action in the current turn. ' +
   'Moves that hit both foes need no target. Single-target moves must pick which foe to hit (Foe A / Foe B). ' +
   'Ally-targeting moves support your partner. Switching uses that slot\'s action for the turn. ' +
   'Only one Pokemon on your whole team may Mega Evolve per battle, and declaring it happens while using the move.';

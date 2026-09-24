@@ -1,9 +1,12 @@
 import type {DexData} from '../dex/index.js';
+import {priorEntryFor, type PriorMeta} from '../dex/priors.js';
 import type {Answer, Question} from '../jev/types.js';
 import type {BattleRequest} from '../state/request.js';
 import type {AnalysisContext} from '../state/analysis.js';
-import {describePreviewCandidate, isMegaCapable} from '../state/serialize.js';
+import {likelyMegaForm} from '../state/opponent-notes.js';
+import {describePreviewCandidate, isMegaCapable, type LikelyMegaFoe} from '../state/serialize.js';
 import {resolveKey} from './answers.js';
+import {BATTLE_GOAL} from './battle-goal.js';
 
 export const PREVIEW_QUESTION_NAMES = ['lead_1', 'lead_2', 'bring_3', 'bring_4'] as const;
 
@@ -12,7 +15,7 @@ export interface PreviewQuestionSet {
   descriptionByKey: Record<string, string>;
 }
 
-const INTRO =
+const INTRO = BATTLE_GOAL +
   'You are choosing which 4 of your 6 Pokemon to bring to a doubles (VGC-style) battle, and in which order. ' +
   'The first two brought Pokemon are your leads (they start on the field). ' +
   'Species/item clauses are active; Mega Evolution is limited to one Pokemon per battle. ' +
@@ -26,7 +29,21 @@ export function buildPreviewQuestions(input: {
   opponentPreviewSpecies: string[];
   analysis?: AnalysisContext;
   opponentLeadPriors?: string[];
+  /** 统计先验（L2+ 用于预期 Mega 形态对位；缺省或 L1 不输出） */
+  priors?: PriorMeta | null;
 }): PreviewQuestionSet {
+  const level2 = input.analysis !== undefined && input.analysis.level >= 2;
+  const priors = input.priors;
+  const likelyMegaFoes: LikelyMegaFoe[] = level2 && priors
+    ? input.opponentPreviewSpecies
+        .flatMap(species => {
+          const entry = priorEntryFor(priors, species);
+          if (!entry) return [];
+          const found = likelyMegaForm(input.dex, species, entry);
+          return found ? [{species, name: found.mega.name, types: [...found.mega.types], percent: found.pair.percent}] : [];
+        })
+        .sort((a, b) => b.percent - a.percent)
+    : [];
   const descriptionByKey: Record<string, string> = {};
   input.request.side.pokemon.forEach((pokemon, index) => {
     descriptionByKey[`slot_${index + 1}`] = describePreviewCandidate({
@@ -36,6 +53,7 @@ export function buildPreviewQuestions(input: {
       megaCapable: isMegaCapable(input.dex, pokemon),
       analysis: input.analysis,
       teamSlot: index + 1,
+      likelyMegaFoes,
     });
   });
 
@@ -48,8 +66,11 @@ export function buildPreviewQuestions(input: {
   const leadPriors = input.analysis && input.analysis.level >= 2 && input.opponentLeadPriors?.length
     ? ` Opponent lead tendencies from tournament priors: ${input.opponentLeadPriors.join('; ')}.`
     : '';
+  const coverageAdvice = likelyMegaFoes.length
+    ? " Check each slot's likely-form coverage: when it lists a probable Mega form, favor that attacker and vary your lead pair instead of repeating a default combination."
+    : '';
   const intro = INTRO + (input.analysis && input.analysis.level >= 2
-    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + megaAdvice + leadPriors : '');
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + coverageAdvice + megaAdvice + leadPriors : '');
   const instructions: Record<string, string> = {
     lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
     lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,
