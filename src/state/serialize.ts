@@ -1,5 +1,5 @@
 import {canMegaWith, megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
-import {effectiveness, estimateDamagePercent, knownEffectiveness} from './calc.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, knownEffectiveness, weatherAdjustedType} from './calc.js';
 import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OurSpeed, type TeamThreat} from './analysis.js';
 import type {OpponentNoteSet} from './opponent-notes.js';
 import {buildBattleContext, seenInBattle} from './battle-context.js';
@@ -235,6 +235,12 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
   if (move.type === 'Water' && move.basePower > 0 && /sun/i.test(input.weather ?? '')) {
     notes.push('the current sun halves Water-type damage; the damage estimate above already reflects this reduction');
   }
+  if (moveId === 'weatherball') {
+    const adjusted = weatherAdjustedType(input.moveId, move.type, input.weather);
+    notes.push(adjusted !== move.type
+      ? `in the current weather Weather Ball is a ${adjusted}-type move with 100 BP instead of 50; the estimate above already uses that type and the current weather's modifiers`
+      : 'Weather Ball changes type and doubles power only while a weather is active: Fire in sun, Water in rain, Rock in sandstorm, Ice in snow');
+  }
   if (moveId === 'fakeout') {
     if (input.firstActionSinceSwitchIn === true) {
       notes.push("Fake Out works only on the user's first action since entering the field, and this is that action: it flinches one foe at +3 priority if it lands");
@@ -251,22 +257,26 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
 
 export function describeMoveOption(input: MoveOptionInput): string {
   const move = input.dex.moves[toId(input.moveId)];
-  const head = `${input.moveName} [${move?.type ?? '?'}/${move?.category ?? '?'}/${move?.basePower ?? '?'}BP/PP ${input.pp}/${input.maxpp}${
+  // 气象球随当前天气改属性并翻倍威力（晴 → Fire/100BP），头部与估算保持一致
+  const moveType = move ? weatherAdjustedType(input.moveId, move.type, input.weather) : undefined;
+  const shownPower = move && moveType !== move.type ? move.basePower * 2 : move?.basePower;
+  const head = `${input.moveName} [${moveType ?? '?'}/${move?.category ?? '?'}/${shownPower ?? '?'}BP/PP ${input.pp}/${input.maxpp}${
     move && move.priority ? `/priority ${move.priority}` : ''
   }]`;
   const extras: string[] = [];
   if (input.hitsBoth) extras.push('hits both foes (0.75x spread)');
   if (move && move.basePower > 0) {
+    const type = moveType ?? move.type;
     if (input.target) {
       const pct = estimateDamagePercent({
         dex: input.dex, moveId: input.moveId, attackerTypes: input.attackerTypes,
         attackerStats: input.attackerStats, defenderSpecies: input.target.species,
         isSpread: input.hitsBoth, weather: input.weather, powerOverride: lastRespectsPower(input),
       });
-      const eff = effectiveness(input.dex, move.type, speciesTypes(input.dex, input.target.species));
+      const eff = effectiveness(input.dex, type, speciesTypes(input.dex, input.target.species));
       extras.push(`vs ${input.target.label} (${input.target.species}, ${input.target.hpPercent}% HP): ≈${pct ?? '?'}% damage${eff !== 1 ? ` (${eff}x)` : ''}`);
       if (input.opponentMegaUsed !== true) {
-        const warning = megaImmunityWarning(input.dex, input.target.species, move.type);
+        const warning = megaImmunityWarning(input.dex, input.target.species, type);
         if (warning) extras.push(warning);
       }
     } else {
@@ -294,6 +304,7 @@ export function describeSwitchOption(input: {
   analysis?: AnalysisContext;
   teamSlot?: number;
   forced?: boolean;
+  weather?: string;
 }): string {
   const species = speciesOf(input.pokemon);
   const types = speciesTypes(input.dex, species);
@@ -302,7 +313,7 @@ export function describeSwitchOption(input: {
   }${input.pokemon.ability ? `, ability ${input.pokemon.ability}` : ''}, ${input.forced ? 'forced replacement' : 'costs your action this turn'}]`;
   const incoming = input.analysis
     ? input.analysis.threats.find(t => input.teamSlot === undefined ? t.ident === input.pokemon.ident : t.slot === input.teamSlot)?.incoming ?? []
-    : input.opponentActives.map(foe => estimateRevealedIncoming({dex: input.dex, defenderSpecies: species, foe}));
+    : input.opponentActives.map(foe => estimateRevealedIncoming({dex: input.dex, defenderSpecies: species, weather: input.weather, foe}));
   const risks = incoming.map(i => `incoming ${i.roughPercent === null ? 'unknown' : `≈${i.roughPercent}%`} from ${i.foeSpecies} (revealed moves only${i.unknownMoves.length ? `; unknown: ${i.unknownMoves.join(', ')}` : ''})`);
   return [head, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot)].filter(Boolean).join('; ');
@@ -328,6 +339,10 @@ export function describePreviewCandidate(input: {
   const species = speciesOf(input.pokemon);
   const types = speciesTypes(input.dex, species);
   const moveNames = (input.pokemon.moves ?? []).map(id => input.dex.moves[toId(id)]?.name ?? id);
+  // 自身入场造天气（如 Drought 造晴）时，气象球按该天气属性参与预览对位
+  const entryWeather = entryWeatherOf(input.pokemon);
+  const effectiveType = (id: string, mv: {type: string}) => weatherAdjustedType(id, mv.type, entryWeather);
+  const typeLabel = (mv: {type: string}, type: string) => type === mv.type ? mv.type : `${type} in ${entryWeather}`;
   let bestName = '';
   let bestCount = 0;
   for (const id of input.pokemon.moves ?? []) {
@@ -339,7 +354,7 @@ export function describePreviewCandidate(input: {
       count = threat?.outgoing.filter(m => toId(m.move) === toId(id) && m.multiplier !== null && m.multiplier > 1).length ?? 0;
     } else {
       for (const foe of input.opponentPreviewSpecies) {
-        const mult = knownEffectiveness(input.dex, mv.type, speciesTypes(input.dex, foe));
+        const mult = knownEffectiveness(input.dex, effectiveType(id, mv), speciesTypes(input.dex, foe));
         if (mult !== null && mult > 1) count++;
       }
     }
@@ -350,14 +365,19 @@ export function describePreviewCandidate(input: {
   }
   const coverage: string[] = [];
   for (const foe of input.likelyMegaFoes ?? []) {
-    let bestHit: {name: string; type: string; multiplier: number} | null = null;
+    const hits: Array<{name: string; label: string; multiplier: number}> = [];
     for (const id of input.pokemon.moves ?? []) {
       const mv = input.dex.moves[toId(id)];
       if (!mv || !mv.basePower) continue;
-      const mult = knownEffectiveness(input.dex, mv.type, foe.types);
-      if (mult !== null && mult > 1 && (!bestHit || mult > bestHit.multiplier)) bestHit = {name: mv.name, type: mv.type, multiplier: mult};
+      const type = effectiveType(id, mv);
+      const mult = knownEffectiveness(input.dex, type, foe.types);
+      if (mult !== null && mult > 1) hits.push({name: mv.name, label: typeLabel(mv, type), multiplier: mult});
     }
-    if (bestHit) coverage.push(`${bestHit.name} (${bestHit.type}) hits likely ${foe.name} [${foe.types.join('/')}] ${bestHit.multiplier}x (${foe.percent.toFixed(1)}% Mega-stone prior, type-only)`);
+    if (!hits.length) continue;
+    const bestMult = Math.max(...hits.map(h => h.multiplier));
+    const best = hits.filter(h => h.multiplier === bestMult).slice(0, 2);
+    const desc = best.map(h => `${h.name} (${h.label})`).join(' and ');
+    coverage.push(`${desc} ${best.length > 1 ? 'hit' : 'hits'} likely ${foe.name} [${foe.types.join('/')}] ${bestMult}x (${foe.percent.toFixed(1)}% Mega-stone prior, type-only)`);
   }
   const parts = [
     `${species} [${types.join('/') || '?'}]`,

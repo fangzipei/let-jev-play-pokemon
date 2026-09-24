@@ -250,6 +250,26 @@ describe('describeMoveOption 战术注解', () => {
     const rain = describeMoveOption({...base, weather: 'RainDance'});
     expect(rain).not.toMatch(/halves Water/);
   });
+  it('晴天下气象球头部与估算按火属性 100 BP 显示并明确说明', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'weatherball', moveName: 'Weather Ball', pp: 10, maxpp: 10,
+      attackerTypes: ['Fire'], attackerStats: {spa: 100},
+      target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100},
+      weather: 'SunnyDay',
+    });
+    expect(text).toContain('Weather Ball [Fire/Special/100BP/PP 10/10]');
+    expect(text).toMatch(/Weather Ball is a Fire-type move with 100 BP/);
+    expect(text).toMatch(/\(4x\)/);
+  });
+  it('无天气时气象球保持普通属性 50 BP 并说明天气映射', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'weatherball', moveName: 'Weather Ball', pp: 10, maxpp: 10,
+      attackerTypes: ['Fire'], attackerStats: {spa: 100},
+      target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100},
+    });
+    expect(text).toContain('Weather Ball [Normal/Special/50BP/PP 10/10]');
+    expect(text).toMatch(/Fire in sun, Water in rain, Rock in sandstorm, Ice in snow/);
+  });
   it('击掌奇袭按窗口状态区分可用提示与失败警告', () => {
     const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
       attackerTypes: ['Fire', 'Dark'], target: foe};
@@ -327,6 +347,21 @@ describe('describePreviewCandidate', () => {
     expect(text).toContain('likely-form coverage: Heat Wave (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x (98.6% Mega-stone prior, type-only)');
     const none = describePreviewCandidate({dex, pokemon: request.side.pokemon[1], opponentPreviewSpecies: ['Golisopod'], megaCapable: false});
     expect(none).not.toContain('likely-form coverage');
+  });
+  it('Drought 持有者的气象球按晴天火属性计入 likely-form coverage 并与火招并列', () => {
+    const data = mkDex();
+    data.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    data.moves.eruption = {name: 'Eruption', type: 'Fire', basePower: 150, category: 'Special', target: 'allAdjacentFoes', priority: 0};
+    const torkoal = {
+      ident: 'p1: Torkoal', details: 'Torkoal, L50, M', condition: '140/140', active: false,
+      stats: {spa: 105}, moves: ['eruption', 'weatherball', 'protect'], item: 'charcoal', ability: 'drought',
+    };
+    const likelyMegaFoes = [{species: 'Golisopod', name: 'Golisopod-Mega', types: ['Bug', 'Steel'], percent: 98.6}];
+    const text = describePreviewCandidate({dex: data, pokemon: torkoal, opponentPreviewSpecies: ['Golisopod'], megaCapable: false, likelyMegaFoes});
+    expect(text).toContain('likely-form coverage: Eruption (Fire) and Weather Ball (Fire in Sun) hit likely Golisopod-Mega [Bug/Steel] 4x (98.6% Mega-stone prior, type-only)');
+    const noDrought = describePreviewCandidate({dex: data, pokemon: {...torkoal, ability: 'whitesmoke'}, opponentPreviewSpecies: ['Golisopod'], megaCapable: false, likelyMegaFoes});
+    expect(noDrought).toContain('likely-form coverage: Eruption (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x');
+    expect(noDrought).not.toContain('Fire in Sun');
   });
 });
 

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {effectiveness, estimateDamagePercent, normalizeTypechart, speedNote, typechartFromDamageTaken} from '../src/state/calc.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, normalizeTypechart, speedNote, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -47,6 +47,37 @@ describe('effectiveness', () => {
   });
 });
 
+describe('weatherAdjustedType（气象球随天气改属性）', () => {
+  it.each([
+    ['SunnyDay', 'Fire'],
+    ['RainDance', 'Water'],
+    ['Sandstorm', 'Rock'],
+    ['Snow', 'Ice'],
+    ['Hail', 'Ice'],
+  ])('天气 %s 下气象球变为 %s', (weather, expected) => {
+    expect(weatherAdjustedType('weatherball', 'Normal', weather)).toBe(expected);
+  });
+  it('无天气（或 none）时保持原属性', () => {
+    expect(weatherAdjustedType('weatherball', 'Normal', undefined)).toBe('Normal');
+    expect(weatherAdjustedType('weatherball', 'Normal', 'none')).toBe('Normal');
+  });
+  it('非气象球不受天气影响', () => {
+    expect(weatherAdjustedType('eruption', 'Fire', 'SunnyDay')).toBe('Fire');
+    expect(weatherAdjustedType('hydropump', 'Water', 'RainDance')).toBe('Water');
+  });
+});
+
+describe('entryWeatherOf（入场天气特性）', () => {
+  it('已知天气特性映射为天气词，其他特性为 undefined', () => {
+    expect(entryWeatherOf({ability: 'drought'})).toBe('Sun');
+    expect(entryWeatherOf({baseAbility: 'Drizzle'})).toBe('Rain');
+    expect(entryWeatherOf({ability: 'sandstream'})).toBe('Sandstorm');
+    expect(entryWeatherOf({ability: 'snowwarning'})).toBe('Snow');
+    expect(entryWeatherOf({ability: 'intimidate'})).toBeUndefined();
+    expect(entryWeatherOf({})).toBeUndefined();
+  });
+});
+
 describe('estimateDamagePercent', () => {
   const dex = mkDex();
   it('克制伤害远高于被抵抗伤害', () => {
@@ -67,6 +98,14 @@ describe('estimateDamagePercent', () => {
   });
   it('状态招式返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'protect', attackerTypes: ['Fire'], defenderSpecies: 'Charizard'})).toBeNull();
+  });
+  it('晴天下气象球按 100 BP 火属性结算，远超雨天与无天气', () => {
+    const base = {dex, moveId: 'weatherball', attackerTypes: ['Fire'], attackerStats: {spa: 100}, defenderSpecies: 'Golisopod'};
+    const sunny = estimateDamagePercent({...base, weather: 'SunnyDay'})!;
+    const rainy = estimateDamagePercent({...base, weather: 'RainDance'})!;
+    const bare = estimateDamagePercent(base)!;
+    expect(sunny).toBeGreaterThan(rainy * 3);
+    expect(sunny).toBeGreaterThan(bare * 10);
   });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();

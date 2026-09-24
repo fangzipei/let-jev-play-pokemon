@@ -356,6 +356,68 @@ describe('buildAnalysisContext 新增条件注解（Reg M-C 热点）', () => {
     const joined = notes.slice(4).map(n => n.notes.join(' ')).join(' ');
     expect(joined).not.toMatch(/permanent|fastest|guarantees survival|synergy with Trick Room/);
   });
+  it('Drought 槽位明确晴天会把气象球变成 100 BP 火属性招式', () => {
+    const input = setup();
+    input.dex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Torkoal', details: 'Torkoal, L50, M', condition: '140/140', active: false,
+        stats: {spe: 20}, moves: ['eruption', 'weatherball', 'protect'], item: 'charcoal', ability: 'drought'},
+    );
+    const torkoal = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(torkoal).toMatch(/Drought sets temporary sun/i);
+    expect(torkoal).toMatch(/Weather Ball becomes a Fire-type move/i);
+    expect(torkoal).toMatch(/100 BP/);
+  });
+  it('Drought 持有者的对位表中气象球按晴天火属性记录', () => {
+    const input = setup();
+    input.dex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Torkoal', details: 'Torkoal, L50, M', condition: '140/140', active: false,
+        stats: {spe: 20}, moves: ['weatherball'], item: 'charcoal', ability: 'drought'},
+    );
+    const threat = buildAnalysisContext(input).threats[4];
+    const vsMetagross = threat.outgoing.find(o => o.foeSpecies === 'Metagross' && o.move === 'Weather Ball');
+    expect(vsMetagross).toMatchObject({type: 'Fire', multiplier: 2});
+  });
+  it('当前天气优先于自身入场推定：雨天对位表里气象球按水属性', () => {
+    const input = setup();
+    input.dex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Torkoal', details: 'Torkoal, L50, M', condition: '140/140', active: false,
+        stats: {spe: 20}, moves: ['weatherball'], item: 'charcoal', ability: 'drought'},
+    );
+    input.state.weather = 'RainDance';
+    const vsVictreebel = buildAnalysisContext(input).threats[4].outgoing.find(o => o.foeSpecies === 'Victreebel' && o.move === 'Weather Ball');
+    expect(vsVictreebel).toMatchObject({type: 'Water', multiplier: 0.5});
+  });
+  it('Mega 天气手：道具确定推断 Mega 后天气特性，气象球按条件化天气注解', () => {
+    const input = setup();
+    input.dex.species.charizardmegay = {
+      name: 'Charizard-Mega-Y', types: ['Fire', 'Flying'],
+      baseStats: {hp: 78, atk: 104, def: 78, spa: 159, spd: 115, spe: 100},
+      abilities: {0: 'Drought'}, baseSpecies: 'Charizard', requiredItem: 'Charizardite Y',
+    };
+    input.request.side.pokemon.push(
+      {ident: 'p1: Charizard', details: 'Charizard, L50, M', condition: '153/153', active: false,
+        stats: {spe: 100}, moves: ['heatwave', 'weatherball', 'protect'], item: 'charizarditey', ability: 'blaze'},
+    );
+    const zard = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(zard).toMatch(/post-Mega Drought/);
+    expect(zard).toMatch(/Weather Ball would then be Fire with 100 BP/);
+    expect(zard).toMatch(/conditional on Mega Evolving, not the current setup/);
+    input.request.side.pokemon[4].item = 'lifeorb';
+    const noStone = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(noStone).not.toMatch(/post-Mega Drought/);
+  });
+  it('已揭示的气象球来袭估算按当前天气：雨天按水属性 100 BP 计', () => {
+    const input = setup();
+    input.state.sides.p2.pokemon.find(p => p.species === 'Victreebel')!.revealedMoves.push('weatherball');
+    const dry = buildAnalysisContext(input).threats[0].incoming.find(i => i.foeSpecies === 'Victreebel')!;
+    input.state.weather = 'RainDance';
+    const rainy = buildAnalysisContext(input).threats[0].incoming.find(i => i.foeSpecies === 'Victreebel')!;
+    expect(dry.roughPercent).not.toBeNull();
+    expect(rainy.roughPercent!).toBeGreaterThan(dry.roughPercent! * 3);
+  });
   it('没有条件就没有注解（不编造）', () => {
     const input = setup(); // 默认队伍含 suckerpunch（priority>0）与 heatwave（spread），会触发 Quick/Wide Guard，但不含下列
     const notes = buildAnalysisContext(input).teamNotes.map(n => n.notes.join(' ')).join(' ');

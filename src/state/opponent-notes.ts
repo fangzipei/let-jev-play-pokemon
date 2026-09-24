@@ -1,6 +1,7 @@
 import {megaFormsOf, type DexData, type SpeciesInfo} from '../dex/index.js';
 import {priorEntryFor, type PriorEntry, type PriorMeta, type PriorPair} from '../dex/priors.js';
 import {queryForOpponent, type MemoryData} from '../learn/store.js';
+import {entryWeatherOf} from './calc.js';
 import {parseIdent, parseLine, toId} from './protocol.js';
 import {weatherDoublesSpeed} from './speed-control.js';
 import type {BattleState, PokemonState} from './tracker.js';
@@ -289,7 +290,9 @@ function megaThreatNote(p: PokemonState, entry: PriorEntry, dex: DexData | undef
     ? `Speed ${mega.baseStats.spe} (from ${baseSpe})` : `Speed ${mega.baseStats.spe}`;
   const megaTypes = mega.types.join('/');
   const baseTypes = base?.types.join('/');
-  return `mega threat — likely ${pair.name} ${pair.percent.toFixed(1)}%: Mega form ${mega.name} [${megaTypes}${baseTypes && baseTypes !== megaTypes ? `, from ${baseTypes}` : ''}] has ${ability ?? 'an unknown ability'} and ${speed} ${source}`;
+  // Mega 形态特性为天气手时（按最频繁石配置预设的形态），附带天气后果：覆盖/争抢场上天气
+  const futureWeather = ability ? entryWeatherOf({ability}) : undefined;
+  return `mega threat — likely ${pair.name} ${pair.percent.toFixed(1)}%: Mega form ${mega.name} [${megaTypes}${baseTypes && baseTypes !== megaTypes ? `, from ${baseTypes}` : ''}] has ${ability ?? 'an unknown ability'} and ${speed}${futureWeather ? `; on Mega Evolution it would set ${futureWeather.toLowerCase()}, contesting any weather in play` : ''} ${source}`;
 }
 
 /** 控速先验威胁：先验招式含控速招（未揭示且未激活）或未揭示天气速度特性（当前天气匹配时）。 */

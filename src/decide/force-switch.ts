@@ -26,7 +26,7 @@ export function buildSwitchPlans(input: {dex: DexData; request: BattleRequest; t
       const teamIndex = teamSlotOf(input.request, p);
       return {
         key: `switch_${teamIndex}`,
-        label: describeSwitchOption({dex: input.dex, pokemon: p, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, forced: true}),
+        label: describeSwitchOption({dex: input.dex, pokemon: p, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, forced: true, weather: input.tracker.state.weather}),
         action: {kind: 'switch', slot, teamIndex},
       };
     });

@@ -172,7 +172,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
       const teamIndex = teamSlotOf(request, bench);
       options.push({
         key: `switch_${teamIndex}`,
-        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex}),
+        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, weather}),
         action: {kind: 'switch', slot, teamIndex},
       });
     }

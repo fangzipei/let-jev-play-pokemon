@@ -1,7 +1,7 @@
 import type {DexData} from '../dex/index.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import type {BattleState, PokemonState, SideState} from './tracker.js';
-import {estimateDamagePercent, knownEffectiveness} from './calc.js';
+import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, weatherAdjustedType} from './calc.js';
 import {toId} from './protocol.js';
 
 export interface OurSpeed {
@@ -146,6 +146,7 @@ function ourSpeed(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
 export function estimateRevealedIncoming(input: {
   dex: DexData;
   defenderSpecies: string;
+  weather?: string;
   foe: {ident?: string; species: string; revealedMoves: string[]};
 }): IncomingEstimate {
   const {dex, foe, defenderSpecies} = input;
@@ -156,7 +157,7 @@ export function estimateRevealedIncoming(input: {
     const move = dex.moves[toId(id)];
     if (!move) { unknownMoves.push(id); continue; }
     if (move.category === 'Status') continue;
-    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, defenderSpecies}) : null;
+    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, defenderSpecies, weather: input.weather}) : null;
     if (pct === null) unknownMoves.push(id);
     else roughPercent = Math.max(roughPercent ?? 0, pct);
   }
@@ -192,6 +193,12 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
     notes.push(sandRushTeammate
       ? "Re-entering with this Pokemon re-sets sandstorm and can overwrite a foe's weather; while the sand is up the Sand Rush teammate keeps its double speed, so losing the weather hands the foe a speed swing"
       : "Re-entering with this Pokemon re-sets sandstorm and can overwrite a foe's weather");
+  }
+  if (ability === 'drought') {
+    notes.push('Drought sets temporary sun on entry; the weather is contested: it expires and a foe can replace or suppress it');
+    notes.push(moves.has('weatherball')
+      ? "In the sun this Pokemon sets, Weather Ball becomes a Fire-type move with 100 BP instead of 50 and gains the sun's damage boost; plan around that, not the base Normal type"
+      : "Re-entering with this Pokemon re-sets sun and can overwrite a foe's weather");
   }
   if (item === 'choicescarf') notes.push('Choice Scarf increases speed x1.5 with a move lock; opponent actual speeds remain unknown');
   if (moves.has('trick')) {
@@ -265,7 +272,18 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (moves.has('perishsong')) notes.push('Perish Song sets a three-turn countdown on all active Pokemon; it forces switches and demands an exit plan before the counter reaches zero');
   if (moves.has('yawn')) notes.push('Yawn puts the target to sleep at the end of its next turn unless it switches out; it is a slow-tempo tool that a switch can answer');
   if (moves.has('auroraveil') || toId(input.state.weather ?? '') === 'snow') notes.push('Aurora Veil halves damage from attacks for five turns while snow is active; it fails without snow and does not reduce indirect damage');
-  if (input.state.weather || moves.has('weatherball')) notes.push('Weather boosts matching damage types and changes Weather Ball type and power; the weather is contested and expires, so do not assume it stays');
+  if (moves.has('weatherball')) {
+    // Mega 天气手（如 Charizardite Y → Drought）：道具与 dex Mega 形态特性可确定推断，仅"是否 Mega"是玩家选择，故条件化
+    const futureAbility = canMega ? Object.values(mega!.abilities ?? {})[0] : undefined;
+    const futureWeather = futureAbility ? entryWeatherOf({ability: futureAbility}) : undefined;
+    if (futureWeather) {
+      const futureType = weatherAdjustedType('weatherball', 'Normal', futureWeather);
+      notes.push(`With ${mega!.requiredItem}, post-Mega ${futureAbility} would set ${futureWeather.toLowerCase()}: Weather Ball would then be ${futureType} with 100 BP instead of 50; this is conditional on Mega Evolving, not the current setup`);
+    }
+    notes.push('Weather Ball changes type and doubles power to 100 BP with the weather: Fire in sun, Water in rain, Rock in sandstorm, Ice in snow; with no weather it stays Normal at 50 BP, and the weather is contested, so do not assume it stays');
+  } else if (input.state.weather) {
+    notes.push('Weather boosts matching damage types; the weather is contested and expires, so do not assume it stays');
+  }
   const seedItems = ['grassyseed', 'psychicseed', 'mistyseed', 'electricseed'];
   if (seedItems.includes(item) && ability === 'unburden') notes.push('A terrain seed is consumed on terrain entry to raise one stat; with Unburden the consumption also doubles speed, so timing the consumption matters');
   else if (hasTeammate(p => seedItems.includes(toId(p.item ?? '')) && toId(p.ability ?? p.baseAbility ?? '') === 'unburden')) notes.push('A teammate pairs a terrain seed with Unburden: that teammate doubles its speed once the seed is consumed');
@@ -291,11 +309,14 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
   const threats: TeamThreat[] = request.side.pokemon.map((p, index) => {
     const species = speciesOf(p);
     const ourTypes = dex.species[toId(species)]?.types ?? [];
+    // 当前天气优先；无天气时按自身入场造天气（如 Drought）推定气象球属性
+    const entryWeather = state.weather || entryWeatherOf(p);
     const outgoing = previewFoes.flatMap(foe => (p.moves ?? []).flatMap(id => {
       const move = dex.moves[toId(id)];
       if (move?.category === 'Status') return [];
-      return [{foeIdent: foe.ident, foeSpecies: foe.species, move: move?.name ?? id, type: move?.type ?? null,
-        multiplier: move ? knownEffectiveness(dex, move.type, foe.types) : null}];
+      const type = move ? weatherAdjustedType(id, move.type, entryWeather) : null;
+      return [{foeIdent: foe.ident, foeSpecies: foe.species, move: move?.name ?? id, type,
+        multiplier: type ? knownEffectiveness(dex, type, foe.types) : null}];
     }));
     const potentialStab = previewFoes.map(foe => {
       const values = foe.types.map(t => knownEffectiveness(dex, t, ourTypes));
@@ -303,7 +324,7 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
         multiplier: !values.length || values.some(v => v === null) ? null : Math.max(...values as number[])};
     });
     const incoming = foes.filter(foe => foe.activePos >= 0 && !foe.fainted && foe.hpPercent > 0)
-      .map(foe => estimateRevealedIncoming({dex, defenderSpecies: species, foe}));
+      .map(foe => estimateRevealedIncoming({dex, defenderSpecies: species, weather: state.weather, foe}));
     return {slot: index + 1, ident: p.ident, outgoing, potentialStab, incoming};
   });
   return {

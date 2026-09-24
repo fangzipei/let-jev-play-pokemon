@@ -65,6 +65,28 @@ export function knownEffectiveness(dex: DexData, moveType: string, defenderTypes
   return effectiveness(dex, moveType, defenderTypes);
 }
 
+/**
+ * 气象球的有效属性：晴天 Fire、雨天 Water、沙暴 Rock、雪/冰雹 Ice。
+ * 无天气或其他招式时返回原属性；天气下的威力翻倍由 estimateDamagePercent 处理。
+ */
+export function weatherAdjustedType(moveId: string, moveType: string, weather: string | undefined): string {
+  if (toId(moveId) !== 'weatherball' || !weather) return moveType;
+  if (/sun/i.test(weather)) return 'Fire';
+  if (/rain/i.test(weather)) return 'Water';
+  if (/sand/i.test(weather)) return 'Rock';
+  if (/snow|hail/i.test(weather)) return 'Ice';
+  return moveType;
+}
+
+/** 入场即造天气的特性 → 天气词；用于预览/对位时推定该宝可梦自造天气下的气象球属性 */
+const ENTRY_WEATHER: Record<string, string> = {
+  drought: 'Sun', drizzle: 'Rain', sandstream: 'Sandstorm', snowwarning: 'Snow',
+};
+
+export function entryWeatherOf(pokemon: {ability?: string; baseAbility?: string}): string | undefined {
+  return ENTRY_WEATHER[toId(pokemon.ability ?? '')] ?? ENTRY_WEATHER[toId(pokemon.baseAbility ?? '')];
+}
+
 export interface DamageEstimateInput {
   dex: DexData;
   moveId: string;
@@ -85,16 +107,19 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const move = input.dex.moves[toId(input.moveId)];
   const def = input.dex.species[toId(input.defenderSpecies)];
   if (!move || !def) return null;
-  const power = input.powerOverride ?? move.basePower;
-  if (!power || power <= 0) return null;
-  const eff = knownEffectiveness(input.dex, move.type, def.types);
+  const basePower = input.powerOverride ?? move.basePower;
+  if (!basePower || basePower <= 0) return null;
+  // 气象球随天气改属性并在有天气时威力翻倍（50 → 100）
+  const moveType = weatherAdjustedType(input.moveId, move.type, input.weather);
+  const power = moveType === move.type ? basePower : basePower * 2;
+  const eff = knownEffectiveness(input.dex, moveType, def.types);
   if (eff === null) return null;
   if (eff === 0) return 0;
-  const stab = input.attackerTypes.some(t => toId(t) === toId(move.type)) ? 1.5 : 1;
+  const stab = input.attackerTypes.some(t => toId(t) === toId(moveType)) ? 1.5 : 1;
   const offStat = (move.category === 'Physical' ? input.attackerStats?.atk : input.attackerStats?.spa) ?? 150;
   const defStat = (move.category === 'Physical' ? def.baseStats.def : def.baseStats.spd) ?? 100;
   const spread = input.isSpread ? 0.75 : 1;
-  const weather = weatherModifier(input.weather, move.type);
+  const weather = weatherModifier(input.weather, moveType);
   const raw = power * (offStat / 150) * eff * stab * spread * weather;
   const pct = (raw * 100) / (defStat * 2 + 80);
   return Math.max(1, Math.min(150, Math.round(pct)));

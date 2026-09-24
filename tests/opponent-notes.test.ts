@@ -408,6 +408,17 @@ describe('buildOpponentNotes chamdb 先验（日文名 + gloss + Mega 标记）'
     expect(text).not.toContain('Charizard-Mega-X');
   });
 
+  it('先验 Mega 形态为天气特性时附带预设天气后果（按最频繁配置）', () => {
+    const zard = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
+      ['p2: Charizard'].assumed.join(' | ');
+    expect(zard).toMatch(/has Drought/);
+    expect(zard).toMatch(/on Mega Evolution it would set sun/);
+    expect(zard).toMatch(/contesting any weather in play/);
+    const metagross = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
+      ['p2: Metagross'].assumed.join(' | ');
+    expect(metagross).not.toMatch(/would set/);
+  });
+
   it('无 X/Y/Z 后缀的单形态不要求标记；标记与形态不符不误报', () => {
     const text = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: chamdbPriors, dex: megaDex()})
       ['p2: Metagross'].assumed.join(' | ');
