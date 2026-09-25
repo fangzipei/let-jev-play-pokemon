@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {parsePikaList, pikaToPriors} from '../src/dex/pikalytics.js';
 import type {PriorMeta} from '../src/dex/priors.js';
-import {buildOpponentNotes, leadPriorLines} from '../src/state/opponent-notes.js';
+import {buildOpponentNotes, expectedFoeLeadLines, expectedFoeLeads, speciesRecordLines, spreadThreatLines, topCoreLine} from '../src/state/opponent-notes.js';
 import {BattleTracker} from '../src/state/tracker.js';
 import {mkDex, mkTracker} from './helpers.js';
 
@@ -247,10 +247,83 @@ describe('buildOpponentNotes assumed（先验假设）', () => {
   });
 });
 
-describe('leadPriorLines', () => {
-  it('按 leads 占比降序取 top，未命中不输出', () => {
-    expect(leadPriorLines(pikaPriors, ['Sneasler', 'Metagross-Mega', 'Unknownmon'], 3)).toEqual(['Sneasler 14.3%']);
-    expect(leadPriorLines(null, ['Sneasler'])).toEqual([]);
+const memLeads = (): MemoryData => {
+  const memory = emptyMemory();
+  memory.species.sneasler = {name: 'Sneasler', seen: 9, wins: 4, losses: 5, leads: 6, items: {}, abilities: {}, moves: {}, notes: []};
+  memory.species.metagross = {name: 'Metagross', seen: 12, wins: 7, losses: 5, leads: 2, items: {}, abilities: {}, moves: {}, notes: []};
+  memory.species.victreebel = {name: 'Victreebel', seen: 2, wins: 1, losses: 1, leads: 2, items: {}, abilities: {}, moves: {}, notes: []};
+  memory.cores['metagross+sneasler'] = {seen: 8, wins: 5, losses: 3, notes: []};
+  return memory;
+};
+
+const leadSpecies = ['Sneasler', 'Metagross', 'Victreebel'];
+
+describe('expectedFoeLeads 预期对手首发（先验+经验库合并）', () => {
+  it('两来源占比各自归一化后取最大占比降序；经验库 seen<3 不参与', () => {
+    const leads = expectedFoeLeads(pikaPriors, memLeads(), leadSpecies);
+    expect(leads.map(l => l.species)).toEqual(['Sneasler', 'Metagross']);
+    expect(leads[0]).toMatchObject({priorPercent: 14.259, memoryLeads: 6, memorySeen: 9, memoryWins: 4, memoryLosses: 5});
+    expect(leads[1]).toMatchObject({priorPercent: null, memoryLeads: 2, memorySeen: 12});
+  });
+  it('单来源退化：缺先验只用经验库、缺经验库只用先验、两者皆缺为空', () => {
+    expect(expectedFoeLeads(null, memLeads(), leadSpecies).map(l => l.species)).toEqual(['Sneasler', 'Metagross']);
+    const priorsOnly = expectedFoeLeads(pikaPriors, null, leadSpecies);
+    expect(priorsOnly.map(l => l.species)).toEqual(['Sneasler']);
+    expect(priorsOnly[0].memoryLeads).toBeNull();
+    expect(expectedFoeLeads(null, null, leadSpecies)).toEqual([]);
+    expect(expectedFoeLeads(pikaPriors, emptyMemory(), ['Unknownmon'])).toEqual([]);
+  });
+  it('渲染行各自标注来源', () => {
+    expect(expectedFoeLeadLines(expectedFoeLeads(pikaPriors, memLeads(), leadSpecies))).toEqual([
+      'Sneasler (prior lead rate 14.3%; led in 6 of 9 battles you played)',
+      'Metagross (led in 2 of 12 battles you played)',
+    ]);
+  });
+});
+
+describe('经验库交手战绩', () => {
+  it('物种战绩按场次降序，seen<3 不参与', () => {
+    expect(speciesRecordLines(memLeads(), leadSpecies)).toEqual(['Metagross 7W-5L', 'Sneasler 4W-5L']);
+    expect(speciesRecordLines(null, leadSpecies)).toEqual([]);
+    expect(speciesRecordLines(emptyMemory(), leadSpecies)).toEqual([]);
+  });
+  it('最常见组合取双方均在名单中且场次最多（seen>=3）', () => {
+    expect(topCoreLine(memLeads(), leadSpecies)).toBe('Metagross+Sneasler 8 battles (5W-3L)');
+    expect(topCoreLine(memLeads(), ['Sneasler'])).toBeNull();
+    expect(topCoreLine(null, leadSpecies)).toBeNull();
+  });
+});
+
+describe('经验库 Mega 形态键兜底（preview 名单为基础形态）', () => {
+  const megaKeyDex = () => {
+    const dex = mkDex();
+    dex.species.charizardmegay = {
+      name: 'Charizard-Mega-Y', types: ['Fire', 'Flying'],
+      baseStats: {hp: 78, atk: 104, def: 78, spa: 159, spd: 115, spe: 100},
+      abilities: {0: 'Drought'}, baseSpecies: 'Charizard', requiredItem: 'Charizardite Y',
+    };
+    return dex;
+  };
+  const megaRecord = () => {
+    const memory = emptyMemory();
+    memory.species.charizardmegay = {name: 'Charizard-Mega-Y', seen: 6, wins: 4, losses: 2, leads: 3, items: {}, abilities: {}, moves: {}, notes: []};
+    return memory;
+  };
+  it('基础形态键未命中时用 dex 的 Mega 形态键', () => {
+    expect(expectedFoeLeads(null, megaRecord(), ['Charizard'], {dex: megaKeyDex()})[0])
+      .toMatchObject({priorPercent: null, memoryLeads: 3, memorySeen: 6, memoryWins: 4, memoryLosses: 2});
+    expect(speciesRecordLines(megaRecord(), ['Charizard'], {dex: megaKeyDex()})).toEqual(['Charizard 4W-2L']);
+  });
+  it('基础与 Mega 键并存时求和合并（同一物种不同形态场次合并）', () => {
+    const memory = megaRecord();
+    memory.species.charizard = {name: 'Charizard', seen: 3, wins: 1, losses: 2, leads: 1, items: {}, abilities: {}, moves: {}, notes: []};
+    expect(expectedFoeLeads(null, memory, ['Charizard'], {dex: megaKeyDex()})[0])
+      .toMatchObject({memoryLeads: 4, memorySeen: 9, memoryWins: 5, memoryLosses: 4});
+    expect(speciesRecordLines(memory, ['Charizard'], {dex: megaKeyDex()})).toEqual(['Charizard 5W-4L']);
+  });
+  it('不带 dex 时维持精确键查询（向后兼容）', () => {
+    expect(expectedFoeLeads(null, megaRecord(), ['Charizard'])).toEqual([]);
+    expect(speciesRecordLines(megaRecord(), ['Charizard'])).toEqual([]);
   });
 });
 
@@ -277,6 +350,11 @@ describe('buildOpponentNotes 控速预警', () => {
     expect(confirmed).toMatch(/speed-control threat/);
     expect(confirmed).toMatch(/not active now/);
     expect(confirmed).toMatch(/doubles its side's Speed for 4 turns/);
+  });
+  it('控速威胁行在常规注解未达上限时不重复', () => {
+    const assumed = buildOpponentNotes({state: mkTracker().state, ourSideId: 'p1', priors: pikaToPriors(controlPika)})
+      ['p2: Whimsicott'].assumed;
+    expect(assumed.filter(l => l.includes('speed-control threat'))).toHaveLength(1);
   });
   it('已揭示且激活中的控速不重复解读（剩余回合由 speed_control 呈现）', () => {
     const tracker = mkTracker();
@@ -316,7 +394,7 @@ describe('buildOpponentNotes 控速预警', () => {
   });
 });
 
-import {emptyMemory, mergeObservation} from '../src/learn/store.js';
+import {emptyMemory, mergeObservation, type MemoryData} from '../src/learn/store.js';
 import type {BattleObservation} from '../src/learn/extract.js';
 
 const OBS: BattleObservation = {
@@ -503,7 +581,52 @@ describe('buildOpponentNotes chamdb 先验（日文名 + gloss + Mega 标记）'
     expect(text).toContain('[Bug/Steel, from Bug/Water]');
   });
 
-  it('leads 缺失时 leadPriorLines 为空（首发缺口保留）', () => {
-    expect(leadPriorLines(chamdbPriors, ['Metagross', 'Charizard'])).toEqual([]);
+  it('leads 缺失时预期首发为空（首发缺口保留）', () => {
+    expect(expectedFoeLeads(chamdbPriors, null, ['Metagross', 'Charizard'])).toEqual([]);
+  });
+});
+
+describe('spreadThreatLines 对手群攻先验', () => {
+  const spreadPriors: PriorMeta = {
+    label: 'pokechamdb M-6 double 2026-09-24',
+    bySpecies: {
+      farigiraf: {
+        items: [], abilities: [], leads: [],
+        moves: [
+          {name: 'Expanding Force', percent: 62.3},
+          {name: 'Psychic', percent: 48.2},
+          {name: 'Hyper Voice', percent: 30.1},
+        ],
+      },
+      garchomp: {
+        items: [], abilities: [], leads: [],
+        moves: [
+          {name: 'Earthquake', percent: 99.2},
+          {name: 'Protect', percent: 98.9},
+        ],
+      },
+      victreebel: {
+        items: [], abilities: [], leads: [],
+        moves: [
+          {name: 'Sludge Bomb', percent: 70},
+          {name: 'Heat Wave', percent: 0},
+        ],
+      },
+    },
+  };
+
+  it('每只取占比最高的群攻招式（条件群攻附展开说明），按占比降序', () => {
+    expect(spreadThreatLines(spreadPriors, ['Farigiraf', 'Garchomp', 'Victreebel'])).toEqual([
+      'Garchomp Earthquake 99.2%',
+      'Farigiraf Expanding Force 62.3% (spread only while Psychic Terrain is active and the user is grounded)',
+    ]);
+  });
+  it('无先验、无比中或群攻占比为 0 时返回空', () => {
+    expect(spreadThreatLines(null, ['Garchomp'])).toEqual([]);
+    expect(spreadThreatLines(spreadPriors, ['Unknownmon'])).toEqual([]);
+    expect(spreadThreatLines(spreadPriors, ['Victreebel'])).toEqual([]);
+  });
+  it('limit 截断按占比降序后的前 N 条', () => {
+    expect(spreadThreatLines(spreadPriors, ['Farigiraf', 'Garchomp'], 1)).toEqual(['Garchomp Earthquake 99.2%']);
   });
 });

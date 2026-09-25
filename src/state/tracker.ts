@@ -27,6 +27,9 @@ export interface PokemonState {
   endedItems?: string[];
   /** 本次上场时的回合号（|start| 前的首发为 0）；用于判定"首个行动回合"（Fake Out 窗口、讲究锁招） */
   switchInTurn?: number;
+  /** 最近一次使用招式的原始名（|move| 事件，如 'Protect'）与回合号；用于连续保护等"上一动作"判定 */
+  lastMoveId?: string;
+  lastMoveTurn?: number;
 }
 
 export interface SideState {
@@ -239,7 +242,10 @@ export class BattleTracker {
       case 'move': {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
-        if (p && a1 && !p.revealedMoves.includes(a1)) p.revealedMoves.push(a1);
+        if (!p) break;
+        if (a1 && !p.revealedMoves.includes(a1)) p.revealedMoves.push(a1);
+        p.lastMoveId = a1;
+        p.lastMoveTurn = this.state.turn;
         break;
       }
       case '-damage':

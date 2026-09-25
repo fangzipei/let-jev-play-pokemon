@@ -92,6 +92,8 @@ export interface DamageEstimateInput {
   moveId: string;
   attackerTypes: string[];
   attackerStats?: Record<string, number>;
+  /** 攻击方当前特性（Adaptability 把本系加成从 1.5x 提到 2.0x） */
+  attackerAbility?: string;
   defenderSpecies: string;
   isSpread?: boolean;
   weather?: string;
@@ -115,7 +117,9 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const eff = knownEffectiveness(input.dex, moveType, def.types);
   if (eff === null) return null;
   if (eff === 0) return 0;
-  const stab = input.attackerTypes.some(t => toId(t) === toId(moveType)) ? 1.5 : 1;
+  const stab = input.attackerTypes.some(t => toId(t) === toId(moveType))
+    ? (toId(input.attackerAbility ?? '') === 'adaptability' ? 2 : 1.5)
+    : 1;
   const offStat = (move.category === 'Physical' ? input.attackerStats?.atk : input.attackerStats?.spa) ?? 150;
   const defStat = (move.category === 'Physical' ? def.baseStats.def : def.baseStats.spd) ?? 100;
   const spread = input.isSpread ? 0.75 : 1;
@@ -123,6 +127,27 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const raw = power * (offStat / 150) * eff * stab * spread * weather;
   const pct = (raw * 100) / (defStat * 2 + 80);
   return Math.max(1, Math.min(150, Math.round(pct)));
+}
+
+/** 按出手时自身血量缩放威力的招式（PS basePowerCallback: power × hp / maxhp） */
+const HP_SCALED_MOVES = new Set(['eruption', 'waterspout', 'dragonenergy']);
+
+/**
+ * 喷火/喷水/龙之能量在出手时的真实基础威力：floor(basePower × HP%)。
+ * 表外招式或缺招式数据返回 null（调用方不应改写这些招式的威力）。
+ */
+export function hpScaledBasePower(dex: DexData, moveId: string, hpPercent: number): number | null {
+  const id = toId(moveId);
+  if (!HP_SCALED_MOVES.has(id)) return null;
+  const move = dex.moves[id];
+  if (!move || !move.basePower) return null;
+  const hp = Math.min(100, Math.max(0, hpPercent));
+  return Math.floor((move.basePower * hp) / 100);
+}
+
+/** 满投资中性性格速度档位（L50）：floor(floor((2*base+94)*0.5)+5)，与 speedtiers 实测一致 */
+export function neutralSpeedTier(baseSpeed: number): number {
+  return Math.floor((2 * baseSpeed + 94) / 2) + 5;
 }
 
 function weatherModifier(weather: string | undefined, moveType: string): number {

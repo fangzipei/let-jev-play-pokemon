@@ -7,7 +7,7 @@ import * as policy from '../src/decide/policy.js';
 import type {DecisionOutcome} from '../src/decide/policy.js';
 import * as advisorModule from '../src/jev/advisor.js';
 import * as jevModule from '../src/jev/client.js';
-import {PsSession} from '../src/ps/session.js';
+import {AI_OPPONENT_NOTICE, PsSession} from '../src/ps/session.js';
 import {nullLogger} from '../src/log/logger.js';
 import {runMatch, summarizeBattles} from '../src/match/runner.js';
 import type {WsLike} from '../src/ps/connection.js';
@@ -237,10 +237,10 @@ describe('runMatch 主接线', () => {
     await rejected;
     expect(dispose).toHaveBeenCalledOnce();
     expect(signal?.aborted).toBe(true);
-    expect(sockets[0].sent).toEqual(['battle-wiring|/timer on', 'battle-wiring|/choose default']);
+    expect(sockets[0].sent).toEqual(['battle-wiring|/timer on', `battle-wiring|${AI_OPPONENT_NOTICE}`, 'battle-wiring|/choose default']);
     reject(new Error('取消后失败'));
     await new Promise(done => setTimeout(done, 0));
-    expect(sockets[0].sent).toEqual(['battle-wiring|/timer on', 'battle-wiring|/choose default']);
+    expect(sockets[0].sent).toEqual(['battle-wiring|/timer on', `battle-wiring|${AI_OPPONENT_NOTICE}`, 'battle-wiring|/choose default']);
   });
 });
 

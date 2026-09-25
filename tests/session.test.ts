@@ -169,6 +169,29 @@ describe('PsSession', () => {
     await waitFor(() => sockets[0].sent.some(s => s === 'battle-gen9championsvgc2026regmc-1|/timer on'));
   });
 
+  it('进入战斗房间时在 chat 用英文告知对手本场由 AI 操作', async () => {
+    const {sockets} = await mkHarness();
+    sockets[0].message('|challstr|4|12345\n');
+    await waitFor(() => sockets[0].sent.some(s => s.startsWith('|/trn ')));
+    sockets[0].message('>battle-gen9championsvgc2026regmc-1\n|player|p1|JevBot1000|1|1500\n');
+    const notice = 'battle-gen9championsvgc2026regmc-1|Hi! Just letting you know: this battle is played automatically by an AI bot.';
+    await waitFor(() => sockets[0].sent.includes(notice));
+    expect(sockets[0].sent.filter(s => s === notice)).toHaveLength(1);
+  });
+
+  it('每场新对局都会重新在 chat 告知对手', async () => {
+    const {sockets} = await mkHarness();
+    sockets[0].message('|challstr|4|12345\n');
+    await waitFor(() => sockets[0].sent.some(s => s.startsWith('|/trn ')));
+    for (const id of ['battle-one', 'battle-two']) {
+      sockets[0].message(`>${id}\n|player|p1|JevBot1000|1|1500\n`);
+    }
+    const noticeOf = (id: string) => `${id}|Hi! Just letting you know: this battle is played automatically by an AI bot.`;
+    await waitFor(() => sockets[0].sent.filter(s => s.includes('|Hi! Just letting you know: this battle is played automatically by an AI bot.')).length === 2);
+    expect(sockets[0].sent).toContain(noticeOf('battle-one'));
+    expect(sockets[0].sent).toContain(noticeOf('battle-two'));
+  });
+
   it('进入战斗房间时日志包含比赛 URL', async () => {
     const infos: string[] = [];
     const logger: Logger = {...nullLogger, info: msg => infos.push(msg)};

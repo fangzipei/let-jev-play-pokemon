@@ -1,10 +1,12 @@
-import type {DexData} from '../dex/index.js';
+import {getMove, speciesTypes, type DexData} from '../dex/index.js';
 import {priorEntryFor, type PriorMeta} from '../dex/priors.js';
 import type {Answer, Question} from '../jev/types.js';
+import type {MemoryData} from '../learn/store.js';
 import type {BattleRequest} from '../state/request.js';
 import type {AnalysisContext} from '../state/analysis.js';
-import {likelyMegaForm} from '../state/opponent-notes.js';
-import {describePreviewCandidate, isMegaCapable, type LikelyMegaFoe} from '../state/serialize.js';
+import {expectedFoeLeadLines, expectedFoeLeads, likelyMegaForm, speciesRecordLines, SPREAD_MOVE_CONDITION, topCoreLine} from '../state/opponent-notes.js';
+import {toId} from '../state/protocol.js';
+import {describePreviewCandidate, isMegaCapable, type LikelyMegaFoe, type PreviewLeadIntel} from '../state/serialize.js';
 import {resolveKey} from './answers.js';
 import {BATTLE_GOAL} from './battle-goal.js';
 
@@ -23,12 +25,31 @@ const INTRO = BATTLE_GOAL +
   'Plan one coherent team of four distinct slots: two complementary leads and two reserves supporting the same win condition. ' +
   'Use each question role to express that combination; duplicates will be resolved after the batch.';
 
+/** 我方全队可用的无损群攻招式（allAdjacentFoes；含条件群攻的展开说明），按队伍顺序，上限 6 条。 */
+function ourSpreadMoves(dex: DexData, request: BattleRequest): string[] {
+  const out: string[] = [];
+  for (const pokemon of request.side.pokemon) {
+    const species = pokemon.details.split(',')[0]?.trim() || pokemon.ident.split(':')[1]?.trim() || '?';
+    for (const moveId of pokemon.moves ?? []) {
+      const move = getMove(dex, moveId);
+      if (!move) continue;
+      const condition = SPREAD_MOVE_CONDITION[toId(move.name)];
+      if (move.target !== 'allAdjacentFoes' && condition === undefined) continue;
+      out.push(`${species} ${move.name}${condition ? ` (${condition})` : ''}`);
+    }
+  }
+  return out.slice(0, 6);
+}
+
 export function buildPreviewQuestions(input: {
   dex: DexData;
   request: BattleRequest;
   opponentPreviewSpecies: string[];
   analysis?: AnalysisContext;
-  opponentLeadPriors?: string[];
+  /** 跨局经验库（L2+ 用于预期首发/交手战绩/常见组合；缺省不输出经验段） */
+  memory?: MemoryData | null;
+  /** 对手群攻先验（L2+ 用于群攻警示与对攻引导；缺省或 L1 不输出） */
+  opponentSpreadThreats?: string[];
   /** 统计先验（L2+ 用于预期 Mega 形态对位；缺省或 L1 不输出） */
   priors?: PriorMeta | null;
 }): PreviewQuestionSet {
@@ -44,6 +65,14 @@ export function buildPreviewQuestions(input: {
         })
         .sort((a, b) => b.percent - a.percent)
     : [];
+  const foeLeads = level2 ? expectedFoeLeads(priors, input.memory, input.opponentPreviewSpecies, {dex: input.dex}) : [];
+  const leadIntelFoes: PreviewLeadIntel[] = foeLeads.map(lead => ({
+    species: lead.species,
+    types: speciesTypes(input.dex, lead.species),
+    memory: lead.memorySeen !== null
+      ? {seen: lead.memorySeen, wins: lead.memoryWins ?? 0, losses: lead.memoryLosses ?? 0, leads: lead.memoryLeads ?? 0}
+      : null,
+  }));
   const descriptionByKey: Record<string, string> = {};
   input.request.side.pokemon.forEach((pokemon, index) => {
     descriptionByKey[`slot_${index + 1}`] = describePreviewCandidate({
@@ -54,6 +83,7 @@ export function buildPreviewQuestions(input: {
       analysis: input.analysis,
       teamSlot: index + 1,
       likelyMegaFoes,
+      leadIntel: level2 ? {foeLeads: leadIntelFoes} : undefined,
     });
   });
 
@@ -63,14 +93,37 @@ export function buildPreviewQuestions(input: {
     : megaHolders === 1
       ? ' Your team has one Mega-capable Pokemon; include it in your four so you keep the option to Mega Evolve.'
       : '';
-  const leadPriors = input.analysis && input.analysis.level >= 2 && input.opponentLeadPriors?.length
-    ? ` Opponent lead tendencies from tournament priors: ${input.opponentLeadPriors.join('; ')}.`
+  // 预期首发段与逐槽经验段同源：先验与经验库各自标注来源；两来源皆缺时不输出经验段
+  const leadLines = expectedFoeLeadLines(foeLeads);
+  const records = level2 ? speciesRecordLines(input.memory, foeLeads.map(lead => lead.species), {dex: input.dex}) : [];
+  const core = level2 ? topCoreLine(input.memory, input.opponentPreviewSpecies) : null;
+  const recordParts = [
+    records.length ? `vs ${records.join(', ')}` : '',
+    core ? `most common core ${core}` : '',
+  ].filter(Boolean);
+  const leadsSentence = leadLines.length ? ` Most probable foe leads: ${leadLines.join('; ')}.` : '';
+  const recordsSentence = recordParts.length ? ` Your recorded results: ${recordParts.join('; ')}.` : '';
+  // 指导句只引用实际存在的分段，避免指向不存在的 leads/records
+  const guideDetail = [
+    leadLines.length ? 'type matchups against these leads' : '',
+    recordParts.length ? 'your records' : '',
+  ].filter(Boolean);
+  const leadIntelText = leadsSentence || recordsSentence
+    ? leadsSentence + recordsSentence + ` Use each slot's "as a lead:" evaluation (speed${guideDetail.length ? `, ${guideDetail.join(' and ')}` : ''}) when choosing your own lead pair and bring order for this opponent; do not reuse the same leads every game.`
+    : '';
+  const spreadThreats = level2 ? input.opponentSpreadThreats ?? [] : [];
+  const ourSpread = spreadThreats.length ? ourSpreadMoves(input.dex, input.request) : [];
+  const spreadAdvice = spreadThreats.length
+    ? ` Opponent spread threats from tournament priors: ${spreadThreats.join('; ')}. Spread moves hit both foes at once and ignore redirection (Follow Me cannot redirect them), so avoid a lead pair that is both weak to the same spread move and plan Protect, Wide Guard or a resist against it.`
+      + (ourSpread.length
+        ? ` Answer with your own spread moves (they hit both foes at once) instead of trading single-target hits: ${ourSpread.join('; ')}.`
+        : '')
     : '';
   const coverageAdvice = likelyMegaFoes.length
     ? " Check each slot's likely-form coverage: when it lists a probable Mega form, favor that attacker and vary your lead pair instead of repeating a default combination."
     : '';
   const intro = INTRO + (input.analysis && input.analysis.level >= 2
-    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + coverageAdvice + megaAdvice + leadPriors : '');
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + coverageAdvice + megaAdvice + leadIntelText + spreadAdvice : '');
   const instructions: Record<string, string> = {
     lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
     lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,

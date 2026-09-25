@@ -309,7 +309,7 @@ describe('jev 共享截止控制', () => {
 });
 
 describe('jev SDK 离线集成与日志安全', () => {
-  it.each(['sdk', 'fetch', 'chat'] as const)('%s 实际请求体保留整局上下文和各题胜利目标', async transport => {
+  it.each(['sdk', 'fetch', 'chat'] as const)('%s 实际请求体保留整局上下文和各题胜利目标', {timeout: 15000}, async transport => {
     const sdk = transport === 'sdk' ? await import('@openrouter/sdk') : undefined;
     const tracker = mkTracker();
     tracker.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');

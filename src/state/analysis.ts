@@ -42,7 +42,7 @@ export interface IncomingEstimate {
 export interface TeamThreat {
   slot: number;
   ident: string;
-  outgoing: Array<{foeIdent: string; foeSpecies: string; move: string; type: string | null; multiplier: number | null}>;
+  outgoing: Array<{foeIdent: string; foeSpecies: string; move: string; type: string | null; multiplier: number | null; damage_percent: number | null}>;
   potentialStab: Array<{foeIdent: string; foeSpecies: string; types: string[]; multiplier: number | null}>;
   incoming: IncomingEstimate[];
 }
@@ -147,7 +147,7 @@ export function estimateRevealedIncoming(input: {
   dex: DexData;
   defenderSpecies: string;
   weather?: string;
-  foe: {ident?: string; species: string; revealedMoves: string[]};
+  foe: {ident?: string; species: string; revealedMoves: string[]; ability?: string | null};
 }): IncomingEstimate {
   const {dex, foe, defenderSpecies} = input;
   const attacker = dex.species[toId(foe.species)];
@@ -157,7 +157,8 @@ export function estimateRevealedIncoming(input: {
     const move = dex.moves[toId(id)];
     if (!move) { unknownMoves.push(id); continue; }
     if (move.category === 'Status') continue;
-    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, defenderSpecies, weather: input.weather}) : null;
+    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, defenderSpecies,
+      weather: input.weather, attackerAbility: foe.ability ?? undefined}) : null;
     if (pct === null) unknownMoves.push(id);
     else roughPercent = Math.max(roughPercent ?? 0, pct);
   }
@@ -306,6 +307,15 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
       ...(p.itemRevealed ? [`revealed item: ${p.itemRevealed}; do not multiply base speed into an actual stat`] : []),
       ...(p.abilityRevealed ? [`revealed ability: ${p.abilityRevealed}`] : [])],
   }));
+  const faintedAllies = state.sides[ourSide]?.pokemon.filter(p => p.fainted).length ?? 0;
+  const liveFoes = foes.filter(foe => foe.activePos >= 0 && !foe.fainted && foe.hpPercent > 0);
+  const partnerAlive = (state.sides[ourSide]?.pokemon.filter(p => p.activePos >= 0 && !p.fainted).length ?? 0) > 1;
+  // 与 sim trySpreadMoveHit 同源：只有招式实际命中多于一个目标时才有 0.75x 群攻减益，残局单目标按单发计
+  const spreadPenaltyNow = (target: string | undefined): boolean => {
+    if (target !== 'allAdjacentFoes' && target !== 'allAdjacent') return false;
+    if (liveFoes.length !== 1) return true;
+    return target === 'allAdjacent' ? partnerAlive : false;
+  };
   const threats: TeamThreat[] = request.side.pokemon.map((p, index) => {
     const species = speciesOf(p);
     const ourTypes = dex.species[toId(species)]?.types ?? [];
@@ -315,8 +325,16 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
       const move = dex.moves[toId(id)];
       if (move?.category === 'Status') return [];
       const type = move ? weatherAdjustedType(id, move.type, entryWeather) : null;
+      // 与渲染层同源的伤害粗估：STAB、攻击值、克制、spread、天气全部计入
+      const damage = move ? estimateDamagePercent({
+        dex, moveId: id, attackerTypes: ourTypes, attackerStats: p.stats,
+        attackerAbility: p.ability ?? p.baseAbility, defenderSpecies: foe.species,
+        isSpread: spreadPenaltyNow(move.target),
+        weather: entryWeather,
+        powerOverride: toId(id) === 'lastrespects' ? 50 + 50 * faintedAllies : undefined,
+      }) : null;
       return [{foeIdent: foe.ident, foeSpecies: foe.species, move: move?.name ?? id, type,
-        multiplier: type ? knownEffectiveness(dex, type, foe.types) : null}];
+        multiplier: type ? knownEffectiveness(dex, type, foe.types) : null, damage_percent: damage}];
     }));
     const potentialStab = previewFoes.map(foe => {
       const values = foe.types.map(t => knownEffectiveness(dex, t, ourTypes));

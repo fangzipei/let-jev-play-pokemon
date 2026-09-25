@@ -15,6 +15,9 @@ function battleUrl(battleId: string): string {
   return `https://play.pokemonshowdown.com/${battleId}`;
 }
 
+/** 开局在 battle 房间 chat 用英文告知对手本场由 AI 自动操作（用户要求：每场开始都要告知） */
+export const AI_OPPONENT_NOTICE = 'Hi! Just letting you know: this battle is played automatically by an AI bot.';
+
 export interface PsSessionOptions {
   conn: PsConnection;
   cfg: AppConfig;
@@ -105,6 +108,8 @@ export class PsSession {
       this.opts.logger.info(`进入战斗房间: ${battleId}（${battleUrl(battleId)}）`);
       // 每场对局默认请求开启计时器（用户约定：超时自动判负而非无限等待）
       this.opts.conn.send(battleId, '/timer on');
+      // 开局在房间 chat 用英文告知对手本场由 AI 自动操作
+      this.opts.conn.send(battleId, AI_OPPONENT_NOTICE);
       for (const resolve of this.battleResolvers.splice(0)) resolve(room);
     }
     return room;

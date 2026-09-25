@@ -137,6 +137,7 @@ describe('buildAnalysisContext 双向克制和 incoming', () => {
     expect(analysis.previewFoes[0].baseSpeed).toBeNull();
     expect(analysis.threats[0].potentialStab[0].multiplier).toBeNull();
     expect(analysis.threats[0].outgoing.every(m => m.multiplier === null)).toBe(true);
+    expect(analysis.threats[0].outgoing.every(m => m.damage_percent === null)).toBe(true);
   });
   it('未知招式与仅揭示状态招式不能转成零威胁，免疫伤害可为零', () => {
     const input = setup();
@@ -153,6 +154,29 @@ describe('buildAnalysisContext 双向克制和 incoming', () => {
     input.dex.typechart = {};
     const analysis = buildAnalysisContext(input);
     expect(analysis.threats[0].potentialStab.every(m => m.multiplier === null)).toBe(true);
+  });
+  it('outgoing 对位表附伤害估算：克制项高于抵抗项且计入攻击值', () => {
+    const input = setup();
+    const threat = buildAnalysisContext(input).threats[0]; // Golisopod
+    const strong = threat.outgoing.find(m => m.foeSpecies === 'Whimsicott' && m.move === 'Iron Head')!;
+    const weak = threat.outgoing.find(m => m.foeSpecies === 'Metagross' && m.move === 'Iron Head')!;
+    expect(strong.damage_percent).toBeGreaterThan(weak.damage_percent!);
+    expect(weak.damage_percent).toBeGreaterThan(0);
+  });
+  it('对手已揭示适应力时来袭估算按 2.0x 本系计入', () => {
+    const input = setup();
+    input.state.sides.p2.pokemon[0].revealedMoves = ['Sludge Bomb'];
+    const before = buildAnalysisContext(input).threats[1].incoming.find(i => i.foeSpecies === 'Victreebel')!.roughPercent!;
+    input.state.sides.p2.pokemon[0].ability = 'adaptability';
+    const after = buildAnalysisContext(input).threats[1].incoming.find(i => i.foeSpecies === 'Victreebel')!.roughPercent!;
+    expect(after).toBeGreaterThan(before);
+  });
+  it('明确只剩一个对手时群攻 outgoing 取消 0.75x spread 减益', () => {
+    const alone = setup();
+    alone.state.sides.p2.pokemon[1].fainted = true;
+    const only = buildAnalysisContext(alone).threats[2].outgoing.find(m => m.move === 'Rock Slide' && m.foeSpecies === 'Victreebel')!;
+    const both = buildAnalysisContext(setup()).threats[2].outgoing.find(m => m.move === 'Rock Slide' && m.foeSpecies === 'Victreebel')!;
+    expect(only.damage_percent).toBeGreaterThan(both.damage_percent!);
   });
 });
 

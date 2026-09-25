@@ -5,6 +5,7 @@ import {parsePikaList, pikaToPriors, type PikaMeta} from '../src/dex/pikalytics.
 import type {DecideInput, JevClient} from '../src/jev/client.js';
 import type {Answer} from '../src/jev/types.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
+import {emptyMemory} from '../src/learn/store.js';
 import type {BattleRequest} from '../src/state/request.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 
@@ -472,7 +473,7 @@ describe('对手注解与经验注入接线', () => {
     expect(basic.sides.opponent.active[0]).not.toHaveProperty('notes');
   });
 
-  it('team-preview 时对手首发先验进入 questions', async () => {
+  it('team-preview 时对手首发先验与经验库进入 questions', async () => {
     const request = mkRequest();
     request.teamPreview = true;
     request.active = undefined;
@@ -483,7 +484,10 @@ describe('对手注解与经验注入接线', () => {
       name: 'Sneasler', rank: '2', percent: '30', winPercent: '50', stats: {spe: 120},
       abilities: [], items: [], moves: [], team: [], leads: [{pokemon: 'Sneasler', percent: '14.3'}],
     }], '2026-05', 'f'));
+    ctx.memory = emptyMemory();
+    ctx.memory.species.sneasler = {name: 'Sneasler', seen: 9, wins: 4, losses: 5, leads: 3, items: {}, abilities: {}, moves: {}, notes: []};
     await decideChoice(ctx);
-    expect(captured.lead_1.instructions).toContain('Sneasler 14.3%');
+    expect(captured.lead_1.instructions).toContain('Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
+    expect(captured.lead_1.instructions).toContain('vs Sneasler 4W-5L');
   });
 });

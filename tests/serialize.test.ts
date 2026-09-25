@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {
-  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, opponentActives, isMegaCapable,
+  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, opponentActives, isMegaCapable, mainAttackOf,
 } from '../src/state/serialize.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 import {buildAnalysisContext} from '../src/state/analysis.js';
@@ -196,7 +196,11 @@ describe('describeMoveOption', () => {
     const text = describeMoveOption({
       dex, moveId: 'heatwave', moveName: 'Heat Wave', pp: 10, maxpp: 10,
       attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190},
-      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100}, hitsBoth: true,
+      hitsBoth: true,
+      targets: [
+        {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+        {label: 'Foe B', species: 'Charizard', hpPercent: 92},
+      ],
     });
     expect(text).toContain('both foes');
     expect(text).toContain('2x');
@@ -270,6 +274,49 @@ describe('describeMoveOption 战术注解', () => {
     expect(text).toContain('Weather Ball [Normal/Special/50BP/PP 10/10]');
     expect(text).toMatch(/Fire in sun, Water in rain, Rock in sandstorm, Ice in snow/);
   });
+  it('群攻招式对每个对手分别给出伤害估算并计入 spread', () => {
+    const base = {dex, moveId: 'heatwave', moveName: 'Heat Wave', pp: 10, maxpp: 10,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 100}};
+    const both = describeMoveOption({...base, hitsBoth: true, targets: [
+      {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+      {label: 'Foe B', species: 'Charizard', hpPercent: 92},
+    ]});
+    expect(both).toContain('hits both foes (0.75x spread)');
+    const pct = (t: string, label: string) => Number(/≈(\d+)% damage/.exec(t.split(`vs ${label}`)[1] ?? '')?.[1] ?? NaN);
+    expect(both).toMatch(/vs Foe A \(Victreebel, 100% HP\): ≈\d+% damage \(2x\)/);
+    expect(both).toMatch(/vs Foe B \(Charizard, 92% HP\): ≈\d+% damage \(0\.5x\)/);
+    expect(pct(both, 'Foe A')).toBeGreaterThan(pct(both, 'Foe B'));
+    const single = describeMoveOption({...base, target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100}});
+    expect(pct(single, 'Foe A')).toBeGreaterThan(pct(both, 'Foe A'));
+  });
+  it('适应力特性在选项伤害估算中按 2.0x 本系加成计入', () => {
+    const base = {dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      target: {label: 'Foe A', species: 'Metagross', hpPercent: 100}};
+    const dmg = (t: string) => Number(/≈(\d+)% damage/.exec(t)?.[1] ?? NaN);
+    const normal = dmg(describeMoveOption(base));
+    const adapt = dmg(describeMoveOption({...base, attackerAbility: 'adaptability'}));
+    expect(adapt).toBeGreaterThan(normal);
+  });
+  it('只剩一个目标时群攻招式的伤害按单发计且不再声称 0.75x spread', () => {
+    const base = {dex, moveId: 'heatwave', moveName: 'Heat Wave', pp: 10, maxpp: 10,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 100}};
+    const target = {label: 'Foe A', species: 'Victreebel', hpPercent: 55};
+    const lastFoe = describeMoveOption({...base, hitsBoth: true, targets: [target]});
+    const single = describeMoveOption({...base, target});
+    const pct = (t: string) => Number(/≈(\d+)% damage/.exec(t)?.[1] ?? NaN);
+    expect(lastFoe).not.toContain('hits both foes (0.75x spread)');
+    expect(lastFoe).toMatch(/remaining foe at full power/);
+    expect(pct(lastFoe)).toBe(pct(single));
+  });
+  it('targets 传空数组时回退到 target 而不是丢弃目标', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, targets: [],
+      target: {label: 'Foe A', species: 'Metagross', hpPercent: 100},
+    });
+    expect(text).toMatch(/vs Foe A \(Metagross, 100% HP\)/);
+  });
   it('击掌奇袭按窗口状态区分可用提示与失败警告', () => {
     const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
       attackerTypes: ['Fire', 'Dark'], target: foe};
@@ -319,6 +366,82 @@ describe('describeSwitchOption', () => {
     expect(text).toContain('Rock/Dark');
     expect(text).toContain('175/175');
   });
+  it('换出收益：Yawn 解除、低血保存、负面阶级清零，无收益时不添加', () => {
+    const request = mkRequest();
+    const base = {dex, pokemon: request.side.pokemon[2], opponentActives: []};
+    const yawn = describeSwitchOption({...base, outgoing: {species: 'Golisopod', yawning: true}});
+    expect(yawn).toContain('switching this slot out removes Yawn from Golisopod before it falls asleep');
+    const low = describeSwitchOption({...base, outgoing: {species: 'Golisopod', hpPercent: 20}});
+    expect(low).toContain('Golisopod is at 20% HP: switching preserves it');
+    const drops = describeSwitchOption({...base, outgoing: {species: 'Golisopod', boosts: {atk: -1, spe: 1}}});
+    expect(drops).toContain("switching out clears Golisopod's lowered stats (atk -1)");
+    expect(drops).not.toContain('spe');
+    const none = describeSwitchOption({...base, outgoing: {species: 'Golisopod', hpPercent: 80, boosts: {atk: 1}}});
+    expect(none).not.toContain('switching');
+  });
+  it('手动换人必须提醒换入者本回合不能行动且会吃打向该槽位的攻击；强制换人不加此提醒', () => {
+    const request = mkRequest();
+    const manual = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: []});
+    expect(manual).toContain('the switch-in cannot act this turn and will take any attacks aimed at this slot');
+    const forced = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: [], forced: true});
+    expect(forced).not.toContain('cannot act this turn');
+    expect(forced).toContain('forced replacement');
+  });
+});
+
+describe('主攻属性被降：换人强化行与招式估算偏差提醒', () => {
+  it('mainAttackOf 按伤害招式类别定主攻，平手按 stats，无伤害招或缺数据返回 null', () => {
+    const request = mkRequest();
+    expect(mainAttackOf(dex, request.side.pokemon[0])).toBe('atk'); // Golisopod：四个物理伤害招
+    expect(mainAttackOf(dex, request.side.pokemon[1])).toBe('spa'); // Chandelure：两个特攻招 + 两个变化招
+    const even = {...request.side.pokemon[1], moves: ['shadowball', 'ironhead']};
+    expect(mainAttackOf(dex, even)).toBe('spa'); // 平手按 spa 190 > atk 60
+    const evenPhysical = {...request.side.pokemon[0], moves: ['ironhead', 'heatwave']};
+    expect(mainAttackOf(dex, evenPhysical)).toBe('atk'); // 平手按 atk 180 > spa 70
+    expect(mainAttackOf(dex, {...request.side.pokemon[1], moves: ['trickroom', 'protect']})).toBeNull();
+    expect(mainAttackOf(dex, {...request.side.pokemon[1], moves: ['shadowball', 'ironhead'], stats: undefined})).toBeNull();
+    expect(mainAttackOf(dex, {...request.side.pokemon[1], moves: ['unknownmove', 'ironhead']})).toBe('atk'); // 未知招式不计
+  });
+  it('换人选项：主攻被降时给强化行，含属性、阶级、输出百分比与优先换人引导', () => {
+    const request = mkRequest();
+    const base = {dex, pokemon: request.side.pokemon[2], opponentActives: []};
+    const spa = describeSwitchOption({...base, outgoing: {species: 'Chandelure', mainAttack: {stat: 'spa', stage: -2}}});
+    expect(spa).toContain('main special attacker');
+    expect(spa).toContain('Special Attack is at -2');
+    expect(spa).toContain('about 50%');
+    expect(spa).toMatch(/consider switching out first/i);
+    const atk = describeSwitchOption({...base, outgoing: {species: 'Golisopod', mainAttack: {stat: 'atk', stage: -1}}});
+    expect(atk).toContain('main physical attacker');
+    expect(atk).toContain('Attack is at -1');
+    expect(atk).toContain('about 67%');
+  });
+  it('换人选项：-1 起触发、未降与非主攻负阶级保持旧行为', () => {
+    const request = mkRequest();
+    const base = {dex, pokemon: request.side.pokemon[2], opponentActives: []};
+    const zero = describeSwitchOption({...base, outgoing: {species: 'Chandelure', mainAttack: {stat: 'spa', stage: 0}}});
+    expect(zero).not.toContain('main special attacker');
+    const mixed = describeSwitchOption({...base, outgoing: {species: 'Chandelure', mainAttack: {stat: 'spa', stage: -2}, boosts: {spa: -2, spe: -1}}});
+    expect(mixed).toContain('main special attacker');
+    expect(mixed).toContain("lowered stats (spe -1)");
+    expect(mixed).not.toContain('spa -2');
+    const other = describeSwitchOption({...base, outgoing: {species: 'Chandelure', mainAttack: {stat: 'spa', stage: 0}, boosts: {atk: -1}}});
+    expect(other).toContain("lowered stats (atk -1)");
+    expect(other).not.toContain('main special attacker');
+  });
+  it('招式选项：主攻被降且类别匹配的伤害招追加估算偏差提醒；状态招与不匹配类别不加', () => {
+    const foe = {label: 'Foe A', species: 'Victreebel', hpPercent: 100};
+    const base = {dex, moveId: 'shadowball', moveName: 'Shadow Ball', pp: 15, maxpp: 15, attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190}, target: foe};
+    const hit = describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: -2}});
+    expect(hit).toContain('Special Attack is at -2');
+    expect(hit).toMatch(/does not include stat stages/);
+    expect(hit).toMatch(/actual damage is lower/);
+    expect(describeMoveOption({...base, moveId: 'trickroom', moveName: 'Trick Room', attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/does not include stat stages/);
+    expect(describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head', attackerTypes: ['Bug', 'Steel'], attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/does not include stat stages/);
+    expect(describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: 0}})).not.toMatch(/does not include stat stages/);
+    const atk = describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head', attackerTypes: ['Bug', 'Steel'], attackerMainAttack: {stat: 'atk', stage: -1}});
+    expect(atk).toContain('Attack is at -1');
+    expect(atk).toContain('about 67%');
+  });
 });
 
 describe('describePreviewCandidate', () => {
@@ -335,6 +458,16 @@ describe('describePreviewCandidate', () => {
     expect(text).toContain('Mega');
     expect(text).toMatch(/best:/);
   });
+  it('best 行在超效计数后附最高伤害估算而非 type-only', () => {
+    const request = mkRequest();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0],
+      opponentPreviewSpecies: ['Victreebel', 'Charizard', 'Kingambit', 'Whimsicott', 'Sneasler', 'Metagross'],
+      megaCapable: true,
+    });
+    expect(text).toMatch(/best: .*hits 3\/6 foes super effectively; top ≈\d+% vs \w+ \(rough estimate\)/);
+    expect(text).not.toContain('type-only');
+  });
   it('传入 likelyMegaFoes 时列出对预期 Mega 形态的超效招式', () => {
     const request = mkRequest();
     const text = describePreviewCandidate({
@@ -344,7 +477,7 @@ describe('describePreviewCandidate', () => {
       megaCapable: false,
       likelyMegaFoes: [{species: 'Golisopod', name: 'Golisopod-Mega', types: ['Bug', 'Steel'], percent: 98.6}],
     });
-    expect(text).toContain('likely-form coverage: Heat Wave (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x (98.6% Mega-stone prior, type-only)');
+    expect(text).toMatch(/likely-form coverage: Heat Wave \(Fire\) hits likely Golisopod-Mega \[Bug\/Steel\] 4x ≈\d+% \(98\.6% Mega-stone prior, rough estimate\)/);
     const none = describePreviewCandidate({dex, pokemon: request.side.pokemon[1], opponentPreviewSpecies: ['Golisopod'], megaCapable: false});
     expect(none).not.toContain('likely-form coverage');
   });
@@ -358,14 +491,99 @@ describe('describePreviewCandidate', () => {
     };
     const likelyMegaFoes = [{species: 'Golisopod', name: 'Golisopod-Mega', types: ['Bug', 'Steel'], percent: 98.6}];
     const text = describePreviewCandidate({dex: data, pokemon: torkoal, opponentPreviewSpecies: ['Golisopod'], megaCapable: false, likelyMegaFoes});
-    expect(text).toContain('likely-form coverage: Eruption (Fire) and Weather Ball (Fire in Sun) hit likely Golisopod-Mega [Bug/Steel] 4x (98.6% Mega-stone prior, type-only)');
+    expect(text).toMatch(/likely-form coverage: Eruption \(Fire\) and Weather Ball \(Fire in Sun\) hit likely Golisopod-Mega \[Bug\/Steel\] 4x ≈\d+% \(98\.6% Mega-stone prior, rough estimate\)/);
     const noDrought = describePreviewCandidate({dex: data, pokemon: {...torkoal, ability: 'whitesmoke'}, opponentPreviewSpecies: ['Golisopod'], megaCapable: false, likelyMegaFoes});
     expect(noDrought).toContain('likely-form coverage: Eruption (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x');
     expect(noDrought).not.toContain('Fire in Sun');
   });
 });
 
+describe('describePreviewCandidate as a lead 评估行', () => {
+  const previewFoes = ['Victreebel', 'Charizard', 'Kingambit', 'Whimsicott', 'Sneasler', 'Metagross'];
+  const mkAnalysis = (level: 1 | 2 = 2) => {
+    const request = mkRequest();
+    request.teamPreview = true;
+    return {request, analysis: buildAnalysisContext({dex, request, state: mkTracker().state, level})};
+  };
+
+  it('L2 输出速度排名/超速事实、预期首发攻防与交手战绩', () => {
+    const {request, analysis} = mkAnalysis();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 1,
+      leadIntel: {foeLeads: [
+        {species: 'Metagross', types: ['Steel', 'Psychic'], memory: {seen: 12, wins: 7, losses: 5, leads: 4}},
+        {species: 'Charizard', types: ['Fire', 'Flying'], memory: null},
+      ]},
+    });
+    expect(text).toContain('as a lead: speed 60 (rank 4 of your 4) — outruns 1/6 foe base speeds (fastest foe base 120; base stats only, natures/EVs/items unknown)');
+    expect(text).toContain('vs probable foe leads: hits Metagross 2x (Drill Run); threatened by Charizard 4x (potential Fire STAB)');
+    expect(text).toContain('memory: Metagross 12 battles (7W-5L)');
+  });
+
+  it('攻防展示上限不裁剪经验句：第三个有关系的预期首发仍保留经验', () => {
+    const {request, analysis} = mkAnalysis();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 1,
+      leadIntel: {foeLeads: [
+        {species: 'Metagross', types: ['Steel', 'Psychic'], memory: {seen: 12, wins: 7, losses: 5, leads: 4}},
+        {species: 'Sneasler', types: ['Fighting', 'Poison'], memory: {seen: 9, wins: 4, losses: 5, leads: 3}},
+        {species: 'Kingambit', types: ['Dark', 'Steel'], memory: {seen: 5, wins: 2, losses: 3, leads: 1}},
+      ]},
+    });
+    expect(text).toContain('vs probable foe leads: hits Metagross 2x (Drill Run); hits Sneasler 2x (Drill Run)');
+    expect(text).not.toContain('hits Kingambit');
+    expect(text).toContain('memory: Metagross 12 battles (7W-5L), Sneasler 9 battles (4W-5L), Kingambit 5 battles (2W-3L)');
+  });
+
+  it('与预期首发无攻防关系时不输出对位与经验句（避免机械重复）', () => {
+    const {request, analysis} = mkAnalysis();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[1], opponentPreviewSpecies: previewFoes, megaCapable: false,
+      analysis, teamSlot: 2,
+      leadIntel: {foeLeads: [{species: 'Charizard', types: ['Fire', 'Flying'], memory: {seen: 9, wins: 5, losses: 4, leads: 2}}]},
+    });
+    expect(text).toContain('as a lead: speed 100');
+    expect(text).not.toContain('vs probable foe leads');
+    expect(text).not.toContain('memory:');
+  });
+
+  it('速度或对手基础速度未知时按 unknown 退化', () => {
+    const {request, analysis} = mkAnalysis();
+    analysis.ourSpeeds[0].speed = null;
+    const unknownSelf = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 1, leadIntel: {foeLeads: []},
+    });
+    expect(unknownSelf).toContain('as a lead: speed unknown');
+    expect(unknownSelf).not.toContain('outruns');
+    const {request: request2, analysis: analysis2} = mkAnalysis();
+    analysis2.previewFoes = [];
+    const unknownFoes = describePreviewCandidate({
+      dex, pokemon: request2.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis: analysis2, teamSlot: 1, leadIntel: {foeLeads: []},
+    });
+    expect(unknownFoes).toContain('as a lead: speed 60 (rank 4 of your 4) — foe base speeds unknown');
+  });
+
+  it('L1 或缺省 leadIntel 时不输出该行', () => {
+    const {request, analysis} = mkAnalysis(1);
+    const l1 = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 1, leadIntel: {foeLeads: [{species: 'Metagross', types: ['Steel', 'Psychic'], memory: null}]},
+    });
+    expect(l1).not.toContain('as a lead:');
+    const noIntel = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 1,
+    });
+    expect(noIntel).not.toContain('as a lead:');
+  });
+});
+
 import {buildOpponentNotes} from '../src/state/opponent-notes.js';
+import {emptyMemory} from '../src/learn/store.js';
 import {parsePikaList, pikaToPriors} from '../src/dex/pikalytics.js';
 import type {SpeedControl} from '../src/state/speed-control.js';
 
@@ -402,19 +620,85 @@ describe('payload 对手注解注入', () => {
   });
 });
 
-describe('buildPreviewQuestions 对手首发先验', () => {
-  it('L2 且传入 opponentLeadPriors 时进入 INTRO', async () => {
-    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+describe('buildPreviewQuestions 预期对手首发与交手战绩', () => {
+  const leadPriors = () => pikaToPriors(parsePikaList([{
+    name: 'Sneasler', rank: '2', percent: '30', winPercent: '50', stats: {spe: 120},
+    abilities: [], items: [], moves: [], team: [], leads: [{pokemon: 'Sneasler', percent: '14.3'}],
+  }], '2026-05', 'f'));
+  const leadMemory = () => {
+    const memory = emptyMemory();
+    memory.species.sneasler = {name: 'Sneasler', seen: 9, wins: 4, losses: 5, leads: 3, items: {}, abilities: {}, moves: {}, notes: []};
+    memory.cores['metagross+sneasler'] = {seen: 8, wins: 5, losses: 3, notes: []};
+    return memory;
+  };
+  const previewRequest = () => {
     const request = mkRequest();
     request.teamPreview = true;
+    return request;
+  };
+  const opponentSpecies = ['Victreebel', 'Charizard', 'Kingambit', 'Whimsicott', 'Sneasler', 'Metagross'];
+
+  it('L2 合并先验与经验库：预期首发两来源标注、战绩与常见组合、指导句，并接线逐槽 as a lead', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = previewRequest();
     const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
     const set = buildPreviewQuestions({
-      dex, request, opponentPreviewSpecies: ['Victreebel'], analysis,
-      opponentLeadPriors: ['Victreebel 9.5%'],
+      dex, request, opponentPreviewSpecies: opponentSpecies, analysis, priors: leadPriors(), memory: leadMemory(),
     });
-    expect(set.questions.lead_1.instructions).toContain('Victreebel 9.5%');
-    const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel'], analysis});
-    expect(none.questions.lead_1.instructions).not.toContain('lead tendencies');
+    const instructions = set.questions.lead_1.instructions;
+    expect(instructions).toContain('Most probable foe leads: Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
+    expect(instructions).toContain('Your recorded results: vs Sneasler 4W-5L; most common core Metagross+Sneasler 8 battles (5W-3L)');
+    expect(instructions).toMatch(/do not reuse the same leads every game/);
+    const slot1 = (set.questions.lead_1.criteria as Record<string, string>).slot_1;
+    expect(slot1).toMatch(/as a lead: speed 60/);
+    expect(slot1).toContain('hits Sneasler 2x (Drill Run)');
+    expect(slot1).toContain('memory: Sneasler 9 battles (4W-5L)');
+  });
+
+  it('指导句只引用实际存在的分段：仅有常见组合时不提 leads，仅先验时不提 records', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = previewRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const memory = emptyMemory();
+    memory.cores['charizard+victreebel'] = {seen: 4, wins: 2, losses: 2, notes: []};
+    const coreOnly = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel', 'Charizard'], analysis, memory});
+    const coreText = coreOnly.questions.lead_1.instructions;
+    expect(coreText).toContain('most common core Charizard+Victreebel 4 battles (2W-2L)');
+    expect(coreText).not.toContain('these leads');
+    expect(coreText).toContain('(speed, your records)');
+    const priorOnly = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Sneasler'], analysis, priors: leadPriors()});
+    const priorText = priorOnly.questions.lead_1.instructions;
+    expect(priorText).toContain('(speed, type matchups against these leads)');
+    expect(priorText).not.toContain('your records');
+  });
+
+  it('退化：缺经验库只用先验、缺先验只用经验库、两者皆缺无经验段（逐槽速度行仍输出）', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = previewRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const base = {dex, request, opponentPreviewSpecies: ['Sneasler'], analysis};
+    const priorOnly = buildPreviewQuestions({...base, priors: leadPriors()});
+    expect(priorOnly.questions.lead_1.instructions).toContain('Sneasler (prior lead rate 14.3%)');
+    expect(priorOnly.questions.lead_1.instructions).not.toContain('battles you played');
+    expect(priorOnly.questions.lead_1.instructions).not.toContain('recorded results');
+    const memoryOnly = buildPreviewQuestions({...base, memory: leadMemory()});
+    expect(memoryOnly.questions.lead_1.instructions).toContain('Sneasler (led in 3 of 9 battles you played)');
+    expect(memoryOnly.questions.lead_1.instructions).toContain('vs Sneasler 4W-5L');
+    const neither = buildPreviewQuestions(base);
+    expect(neither.questions.lead_1.instructions).not.toContain('Most probable foe leads');
+    expect(neither.questions.lead_1.instructions).not.toContain('recorded results');
+    expect((neither.questions.lead_1.criteria as Record<string, string>).slot_1).toContain('as a lead: speed 60');
+  });
+
+  it('L1 不输出经验段与逐槽 as a lead 行', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = previewRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 1});
+    const set = buildPreviewQuestions({
+      dex, request, opponentPreviewSpecies: ['Sneasler'], analysis, priors: leadPriors(), memory: leadMemory(),
+    });
+    expect(set.questions.lead_1.instructions).not.toContain('Most probable foe leads');
+    expect((set.questions.lead_1.criteria as Record<string, string>).slot_1).not.toContain('as a lead:');
   });
 });
 
@@ -440,6 +724,62 @@ describe('buildPreviewQuestions 预期 Mega 形态对位', () => {
     const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Golisopod'], analysis});
     expect((none.questions.lead_1.criteria as Record<string, string>).slot_2).not.toContain('likely-form coverage');
     expect(none.questions.lead_1.instructions).not.toContain('likely-form coverage');
+  });
+});
+
+describe('buildPreviewQuestions 对手群攻警示', () => {
+  const previewRequest = () => {
+    const request = mkRequest();
+    request.teamPreview = true;
+    return request;
+  };
+
+  it('L2 且传入 opponentSpreadThreats 时输出群攻警示、我方群攻清单与对攻引导', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const request = previewRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const set = buildPreviewQuestions({
+      dex, request, opponentPreviewSpecies: ['Farigiraf'], analysis,
+      opponentSpreadThreats: ['Farigiraf Expanding Force 62.3% (spread only while Psychic Terrain is active)'],
+    });
+    const text = set.questions.lead_1.instructions;
+    expect(text).toContain('Farigiraf Expanding Force 62.3%');
+    expect(text).toMatch(/spread moves hit both foes at once and ignore redirection/i);
+    expect(text).toMatch(/Follow Me cannot redirect them/i);
+    expect(text).toMatch(/avoid a lead pair that is both weak to the same spread move/i);
+    expect(text).toMatch(/answer with your own spread moves/i);
+    expect(text).toMatch(/instead of trading single-target hits/i);
+    expect(text).toContain('Chandelure Heat Wave');
+    expect(text).toContain('Tyranitar Rock Slide');
+    expect(text).toContain('Salamence Hyper Voice');
+  });
+
+  it('我方广域战力标注展开条件；无群攻先验或 L1 不输出', async () => {
+    const {buildPreviewQuestions} = await import('../src/decide/team-preview.js');
+    const data = mkDex();
+    data.moves.expandingforce = {name: 'Expanding Force', type: 'Psychic', basePower: 80, category: 'Special', target: 'normal', priority: 0};
+    const request = previewRequest();
+    request.side.pokemon[1].moves = [...(request.side.pokemon[1].moves ?? []), 'expandingforce'];
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex: data, request, state, level: 2});
+    const set = buildPreviewQuestions({
+      dex: data, request, opponentPreviewSpecies: ['Farigiraf'], analysis,
+      opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
+    });
+    expect(set.questions.lead_1.instructions).toContain('Chandelure Expanding Force (spread only while Psychic Terrain is active and the user is grounded)');
+    const none = buildPreviewQuestions({dex: data, request, opponentPreviewSpecies: ['Farigiraf'], analysis});
+    expect(none.questions.lead_1.instructions).not.toContain('Opponent spread threats');
+    const legacy = buildPreviewQuestions({
+      dex: data, request, opponentPreviewSpecies: ['Farigiraf'],
+      opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
+    });
+    expect(legacy.questions.lead_1.instructions).not.toContain('Opponent spread threats');
+    const l1Set = buildPreviewQuestions({
+      dex: data, request, opponentPreviewSpecies: ['Farigiraf'],
+      analysis: buildAnalysisContext({dex: data, request, state, level: 1}),
+      opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
+    });
+    expect(l1Set.questions.lead_1.instructions).not.toContain('Opponent spread threats');
   });
 });
 
@@ -476,6 +816,17 @@ describe('控速剩余回合注入', () => {
     const idle = describeMoveOption({...base, speedControl: emptySpeedControl});
     expect(idle).toMatch(/lasts 4 turns/);
   });
+  it('对手顺风激活时戏法空间注解提示可反转其速度优势', () => {
+    const base = {dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5, attackerTypes: ['Ghost']};
+    const withFoeTw = describeMoveOption({...base, speedControl: {...emptySpeedControl, opponent_tailwind: {started_turn: 2, turns_left: 3}}});
+    expect(withFoeTw).toContain("the foe's Tailwind is active");
+    expect(withFoeTw).toMatch(/inverts the acting order/);
+    expect(withFoeTw).toMatch(/doubled Speed would work against them/);
+    const noTw = describeMoveOption({...base, speedControl: emptySpeedControl});
+    expect(noTw).not.toContain("the foe's Tailwind is active");
+    const activeTr = describeMoveOption({...base, speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 4}, opponent_tailwind: {started_turn: 2, turns_left: 3}}});
+    expect(activeTr).not.toContain("the foe's Tailwind is active");
+  });
   it('未传 speedControl 时注解保持旧行为', () => {
     const tr = describeMoveOption({
       dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5,
@@ -485,5 +836,152 @@ describe('控速剩余回合注入', () => {
     expect(tr).not.toMatch(/more turns including this one/);
     const tailwind = describeMoveOption({dex, moveId: 'tailwind', moveName: 'Tailwind', pp: 15, maxpp: 15, attackerTypes: ['Flying']});
     expect(tailwind).not.toMatch(/lasts 4 turns/);
+  });
+});
+
+describe('戏法空间收益事实注解', () => {
+  const trickRoomChoice = (extra: Partial<Parameters<typeof describeMoveOption>[0]>) => describeMoveOption({
+    dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5, attackerTypes: ['Ghost', 'Fire'], ...extra,
+  });
+  const baseAnalysis = () => buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 2});
+
+  it('我方慢速成员低于对手在场者中性档位时，给出空间下先手事实与在场标记', () => {
+    const text = trickRoomChoice({
+      attackerSlot: 2, analysis: baseAnalysis(),
+      ourLiveSpeeds: [
+        {species: 'Golisopod', speed: 60, active: true},
+        {species: 'Tyranitar', speed: 82, active: false},
+        {species: 'Chandelure', speed: 100, active: true},
+        {species: 'Salamence', speed: 152, active: false},
+      ],
+    });
+    expect(text).toContain('under Trick Room your slower Pokemon act first');
+    expect(text).toContain('Golisopod (estimated speed 60, on the field)');
+    expect(text).toContain('Tyranitar (estimated speed 82, on the bench)');
+    expect(text).toContain('Chandelure (estimated speed 100, on the field)');
+    expect(text).not.toContain('Salamence (estimated');
+    expect(text).toContain("both foes' neutral full-investment tiers (Victreebel 122, Charizard 152)");
+    expect(text).toMatch(/would move before the foes/);
+  });
+
+  it('残局只剩一个对手时改用单数基准与 remaining foe', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|faint|p2b: Charizard');
+    const analysis = buildAnalysisContext({dex, request: mkRequest(), state: tracker.state, level: 2});
+    const text = trickRoomChoice({attackerSlot: 2, analysis, ourLiveSpeeds: [{species: 'Golisopod', speed: 60, active: true}]});
+    expect(text).toContain("foe Victreebel's neutral full-investment tier (122)");
+    expect(text).toMatch(/would move before the remaining foe/);
+  });
+
+  it('无慢于对手档位的成员或数据不足时不输出收益行（机制注解保留）', () => {
+    const analysis = baseAnalysis();
+    const fast = trickRoomChoice({attackerSlot: 2, analysis, ourLiveSpeeds: [{species: 'Salamence', speed: 200, active: false}]});
+    expect(fast).not.toContain('your slower Pokemon act first');
+    expect(fast).toMatch(/5 turns/);
+    const noSlot = trickRoomChoice({analysis, ourLiveSpeeds: [{species: 'Golisopod', speed: 60, active: true}]});
+    expect(noSlot).not.toContain('your slower Pokemon act first');
+    const noSpeeds = trickRoomChoice({attackerSlot: 2, analysis});
+    expect(noSpeeds).not.toContain('your slower Pokemon act first');
+  });
+
+  it('空间已激活时不输出收益行，只保留重开取消警示', () => {
+    const text = trickRoomChoice({
+      attackerSlot: 2, analysis: baseAnalysis(),
+      ourLiveSpeeds: [{species: 'Golisopod', speed: 60, active: true}],
+      speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 4}},
+    });
+    expect(text).toMatch(/already active/);
+    expect(text).not.toContain('your slower Pokemon act first');
+  });
+});
+
+describe('喷火类招式：血量缩放威力与出手顺序注解', () => {
+  const damageOf = (label: string) => Number(/≈(\d+)% damage/.exec(label)![1]);
+  it('按当前血量给出真实威力，且伤害估算随血量下降', () => {
+    const base = {
+      dex, moveId: 'eruption', moveName: 'Eruption', pp: 5, maxpp: 5,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 145},
+      target: {label: 'Foe A', species: 'Charizard', hpPercent: 92},
+    };
+    const full = describeMoveOption({...base, attackerHpPercent: 100});
+    const mid = describeMoveOption({...base, attackerHpPercent: 73});
+    const low = describeMoveOption({...base, attackerHpPercent: 50});
+    expect(mid).toContain("Eruption's power scales with your HP when it resolves: ≈109 BP at your current 73% HP, about 15 BP per 10% HP lost");
+    expect(damageOf(low)).toBeLessThan(damageOf(mid));
+    expect(damageOf(mid)).toBeLessThan(damageOf(full));
+  });
+  it('对手标准档位更快且后手会削血时，重算出招时血量与威力', () => {
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 1});
+    analysis.ourSpeeds[0].speed = 36;
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    analysis.threats[0].incoming[0].roughPercent = 38;
+    const label = describeMoveOption({
+      dex, moveId: 'eruption', moveName: 'Eruption', pp: 5, maxpp: 5,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {spa: 70},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'},
+      analysis, attackerSlot: 1, attackerHpPercent: 73,
+    });
+    expect(label).toContain('Victreebel (neutral full-investment 172) outruns your estimated speed 36');
+    expect(label).toContain('if it hits you first for ≈38% (revealed moves only), this resolves at ≈35% HP and ≈52 BP');
+  });
+  it('后手伤害足以击倒时不承诺出招；未揭示来袭时只给无数字的弱化提示', () => {
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 1});
+    analysis.ourSpeeds[0].speed = 36;
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    const labelWith = (rough: number | null) => {
+      analysis.threats[0].incoming[0].roughPercent = rough;
+      return describeMoveOption({
+        dex, moveId: 'eruption', moveName: 'Eruption', pp: 5, maxpp: 5,
+        attackerTypes: ['Bug', 'Steel'], attackerStats: {spa: 70},
+        target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'},
+        analysis, attackerSlot: 1, attackerHpPercent: 73,
+      });
+    };
+    const lethal = labelWith(80);
+    expect(lethal).toContain('a first hit for ≈80% (revealed moves only) would KO you before this resolves');
+    expect(lethal).not.toContain('this resolves at');
+    const unknown = labelWith(null);
+    expect(unknown).toContain('outruns your estimated speed 36: if it damages you first, this move resolves weaker');
+    expect(unknown).not.toContain('revealed moves only');
+  });
+  it('Trick Room 激活时按反转后的出手顺序提示，不再用 outruns', () => {
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 1});
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    const base = {
+      dex, moveId: 'eruption', moveName: 'Eruption', pp: 5, maxpp: 5,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {spa: 70},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'},
+      analysis, attackerSlot: 1, attackerHpPercent: 73,
+      speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 4}},
+    };
+    analysis.ourSpeeds[0].speed = 36;
+    const slower = describeMoveOption(base);
+    expect(slower).toContain('under the active Trick Room your estimated speed 36 acts before Victreebel (neutral full-investment 172)');
+    expect(slower).not.toContain('outruns');
+    analysis.ourSpeeds[0].speed = 200;
+    const faster = describeMoveOption(base);
+    expect(faster).toContain('under the active Trick Room the slower side moves first: Victreebel (neutral full-investment 172) would likely act before your estimated speed 200');
+    expect(faster).not.toContain('outruns');
+  });
+  it('非缩放招式或缺省血量参数时不输出缩放与速度注解', () => {
+    const heat = describeMoveOption({
+      dex, moveId: 'heatwave', moveName: 'Heat Wave', pp: 10, maxpp: 10,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 145},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+      attackerHpPercent: 73,
+    });
+    expect(heat).not.toContain('scales with your HP');
+    const legacy = describeMoveOption({
+      dex, moveId: 'eruption', moveName: 'Eruption', pp: 5, maxpp: 5,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {spa: 70},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'},
+      analysis: buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 1}),
+      attackerSlot: 1,
+    });
+    expect(legacy).not.toContain('scales with your HP');
+    expect(legacy).not.toContain('outruns');
   });
 });

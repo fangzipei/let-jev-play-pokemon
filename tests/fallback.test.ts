@@ -48,6 +48,66 @@ describe('fallbackTurnActions', () => {
     const actions = fallbackTurnActions({dex, request, tracker: mkTracker()});
     expect(actions).toEqual([{kind: 'move', slot: 2, moveIndex: 2}]);
   });
+
+  it('残局只剩一个对手时适应力把本系加成计入兜底评分', () => {
+    const normalTracker = mkTracker();
+    normalTracker.state.sides.p2.pokemon[0].fainted = true; // 只留 Charizard
+    const normal = fallbackTurnActions({dex, request: mkRequest(), tracker: normalTracker});
+    // 无适应力：Iron Head 31% < Sucker Punch 36% → Sucker Punch
+    expect(normal.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 4});
+    const request = mkRequest();
+    request.side.pokemon[0].ability = 'adaptability';
+    const adaptTracker = mkTracker();
+    adaptTracker.state.sides.p2.pokemon[0].fainted = true;
+    const adapt = fallbackTurnActions({dex, request, tracker: adaptTracker});
+    // 适应力：Iron Head 41% > Sucker Punch 36% → Iron Head
+    expect(adapt.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 1});
+  });
+
+  it('上一回合守过后兜底直接跳过保护类招式', () => {
+    const request = mkRequest();
+    request.active![0].moves = [
+      {move: 'Protect', id: 'protect', pp: 8, maxpp: 8, target: 'self'},
+      {move: 'Trick Room', id: 'trickroom', pp: 5, maxpp: 5, target: 'all'},
+    ];
+    const chained = mkTracker();
+    chained.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
+    chained.handleLine('|turn|2');
+    const actions = fallbackTurnActions({dex, request, tracker: chained});
+    // 保护类不在候选 → 只剩 Trick Room
+    expect(actions.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 2});
+    const fresh = fallbackTurnActions({dex, request, tracker: mkTracker()});
+    // 未连续时 Protect（0.9）优先于其他状态招式（0.5）
+    expect(fresh.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 1});
+  });
+
+  it('连续保护跳过时不回退到保护（无其他可用招式时走 slot-default）', () => {
+    const request = mkRequest();
+    request.active![0].moves = [
+      {move: 'Protect', id: 'protect', pp: 8, maxpp: 8, target: 'self'},
+      {move: 'Iron Head', id: 'ironhead', pp: 0, maxpp: 15, target: 'normal'},
+    ];
+    const chained = mkTracker();
+    chained.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
+    chained.handleLine('|turn|2');
+    // 降权实现会回退到 Protect（0.1）；跳过实现没有候选 → slot-default
+    const actions = fallbackTurnActions({dex, request, tracker: chained});
+    expect(actions.find(a => 'slot' in a && a.slot === 1)).toMatchObject({kind: 'slot-default'});
+  });
+
+  it('间隔一回合后兜底恢复优先保护类招式（stall 计数已清除）', () => {
+    const request = mkRequest();
+    request.active![0].moves = [
+      {move: 'Protect', id: 'protect', pp: 8, maxpp: 8, target: 'self'},
+      {move: 'Trick Room', id: 'trickroom', pp: 5, maxpp: 5, target: 'all'},
+    ];
+    const stale = mkTracker();
+    stale.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
+    stale.handleLine('|turn|2');
+    stale.handleLine('|turn|3');
+    // 上一回合未守 → Protect 恢复常规优先（0.9 > Trick Room 0.5）
+    expect(fallbackTurnActions({dex, request, tracker: stale}).find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 1});
+  });
 });
 
 describe('fallbackSwitchActions', () => {

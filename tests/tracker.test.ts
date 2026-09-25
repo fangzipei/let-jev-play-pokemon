@@ -178,6 +178,16 @@ describe('BattleTracker', () => {
     expect(t.state.ended).toBe(true);
   });
 
+  it('|move| 记录最近招式与回合号（连续保护判定用）', () => {
+    const t = feed(replay, 'TestBot');
+    const sableye = t.state.sides.p1.pokemon.find(p => p.name === 'Sableye')!;
+    expect(sableye.lastMoveId).toBe('Protect');
+    expect(sableye.lastMoveTurn).toBe(5);
+    const whimsicott = t.state.sides.p2.pokemon.find(p => p.name === 'Whimsicott')!;
+    expect(whimsicott.lastMoveId).toBe('Tailwind');
+    expect(whimsicott.lastMoveTurn).toBe(1);
+  });
+
   it('场上位置随换人更新', () => {
     const t = feed(replay, 'TestBot');
     const kal = t.state.sides.p1.pokemon.find(p => p.name === 'Kingambit');

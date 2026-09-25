@@ -450,3 +450,181 @@ describe('累计摘要与快照', () => {
     expect(build(b).summary.opponent.pokemon).toEqual([]);
   });
 });
+
+describe('turn_outcomes 累计结果记录', () => {
+  it('记录群攻被广域防守完全挡下的实际结果', () => {
+    const t = feed(mkTracker(),
+      '|move|p2b: Charizard|Wide Guard|p2b: Charizard',
+      '|-singleturn|p2b: Charizard|Wide Guard',
+      '|move|p1b: Chandelure|Heat Wave|p2a: Victreebel|[spread] p2a,p2b',
+      '|-activate|p2a: Victreebel|move: Wide Guard',
+      '|-activate|p2b: Charizard|move: Wide Guard',
+    );
+    const c = build(t);
+    expect(c.turn_outcomes).toEqual([
+      'T1 our Chandelure Heat Wave: blocked by foe Wide Guard (protected: Victreebel, Charizard)',
+    ]);
+    expect(c.turn_outcomes_truncated).toBe(false);
+  });
+
+  it('记录单目标被 Protect 挡下与对手无法行动', () => {
+    const t = feed(mkTracker(),
+      '|move|p2a: Victreebel|Protect|p2a: Victreebel',
+      '|move|p1a: Golisopod|Iron Head|p2a: Victreebel',
+      '|-activate|p2a: Victreebel|move: Protect',
+      '|cant|p2b: Charizard|flinch',
+    );
+    expect(build(t).turn_outcomes).toEqual([
+      'T1 our Golisopod Iron Head: blocked by foe Protect (protected: Victreebel)',
+      'T1 foe Charizard could not act (flinch)',
+    ]);
+  });
+
+  it('记录命中伤害净变化并在击倒时折叠，多段伤害合并', () => {
+    const t = feed(mkTracker(),
+      '|move|p1b: Chandelure|Heat Wave|p2a: Victreebel|[spread] p2a,p2b',
+      '|-damage|p2a: Victreebel|62/100',
+      '|-damage|p2a: Victreebel|24/100',
+      '|-damage|p2b: Charizard|0 fnt',
+      '|faint|p2b: Charizard',
+    );
+    expect(build(t).turn_outcomes).toEqual([
+      'T1 our Chandelure Heat Wave: hit foe Victreebel (100→24), hit foe Charizard (92→0), knocked out',
+    ]);
+  });
+
+  it('记录未命中、免疫与招式失败', () => {
+    const t = feed(mkTracker(),
+      '|move|p1a: Golisopod|Drill Run|p2b: Charizard|[miss]',
+      '|-miss|p1a: Golisopod|p2b: Charizard',
+      '|move|p1a: Golisopod|Iron Head|p2b: Charizard',
+      '|-immune|p2b: Charizard',
+      '|move|p1a: Golisopod|Protect||[still]',
+      '|-fail|p1a: Golisopod',
+    );
+    expect(build(t).turn_outcomes).toEqual([
+      'T1 our Golisopod Drill Run: missed foe Charizard',
+      'T1 our Golisopod Iron Head: no effect on foe Charizard (immune)',
+      'T1 our Golisopod Protect: move failed',
+    ]);
+  });
+
+  it('双方结果按 our/foe 归属，窗口外外部伤害与回血不产生记录只调整基线', () => {
+    const t = feed(mkTracker(),
+      '|-damage|p2a: Victreebel|40/100',
+      '|-heal|p2a: Victreebel|70/100|[from] item: Leftovers',
+      '|move|p2a: Victreebel|Sludge Bomb|p1b: Chandelure',
+      '|-damage|p1b: Chandelure|75/135',
+      '|move|p1b: Chandelure|Shadow Ball|p2a: Victreebel',
+      '|-damage|p2a: Victreebel|30/100',
+    );
+    expect(build(t).turn_outcomes).toEqual([
+      'T1 foe Victreebel Sludge Bomb: hit our Chandelure (135→75)',
+      'T1 our Chandelure Shadow Ball: hit foe Victreebel (70→30)',
+    ]);
+  });
+
+  it('窗口外的击倒（如异常状态结算）独立记录，孤立伤害不冒充招式结果', () => {
+    const t = feed(mkTracker(),
+      '|-damage|p2a: Victreebel|40/100',
+      '|-damage|p2b: Charizard|0 fnt|[from] brn',
+      '|faint|p2b: Charizard',
+    );
+    expect(build(t).turn_outcomes).toEqual(['T1 foe Charizard knocked out']);
+  });
+
+  it('对象没有 HP 基线时不编造伤害数字', () => {
+    const t = new BattleTracker('battle-no-baseline', 'us');
+    t.state.turn = 1;
+    t.state.log = ['|turn|1', '|move|p1a: Golisopod|Iron Head|p9a: Mystery', '|-damage|p9a: Mystery|50/100'];
+    expect(build(t).turn_outcomes).toEqual(['T1 our Golisopod Iron Head: hit foe Mystery']);
+  });
+
+  it('turn_outcomes 超预算时从最早截断并标记', () => {
+    const t = new BattleTracker('battle-outcome-budget', 'us');
+    t.state.turn = 80;
+    const log: string[] = [];
+    for (let turn = 1; turn <= 80; turn++) {
+      log.push(`|turn|${turn}`, '|switch|p2a: Victreebel|Victreebel, L50|100/100',
+        '|move|p1a: Golisopod|Iron Head|p2a: Victreebel', '|-damage|p2a: Victreebel|50/100');
+    }
+    t.state.log = log;
+    const c = build(t);
+    expect(JSON.stringify(c.turn_outcomes).length).toBeLessThanOrEqual(4000);
+    expect(c.turn_outcomes_truncated).toBe(true);
+    expect(c.turn_outcomes.at(-1)).toBe('T80 our Golisopod Iron Head: hit foe Victreebel (100→50)');
+    expect(c.turn_outcomes[0]).not.toMatch(/^T1 /);
+  });
+
+  it('回合标记无效时跳过无法归属的记录并标记截断', () => {
+    const t = new BattleTracker('battle-outcome-badmarker', 'us');
+    t.state.turn = 2;
+    t.state.log = ['|turn|bad', '|move|p1a: Golisopod|Iron Head|p2a: Victory', '|-damage|p2a: Victory|50/100'];
+    const c = build(t);
+    expect(c.turn_outcomes).toEqual([]);
+    expect(c.turn_outcomes_truncated).toBe(true);
+  });
+
+  it('tracker 日志裁剪时标记结果记录不完整', () => {
+    const t = feed(mkTracker(), '|move|p1a: Golisopod|Iron Head|p2a: Victreebel', '|-damage|p2a: Victreebel|50/100');
+    t.state.logTruncated = true;
+    const c = build(t);
+    expect(c.turn_outcomes).toEqual(['T1 our Golisopod Iron Head: hit foe Victreebel (100→50)']);
+    expect(c.turn_outcomes_truncated).toBe(true);
+  });
+
+  it('注入与非法行不进入 turn_outcomes', () => {
+    const t = mkTracker();
+    t.state.log.push(
+      '|move|p1a: /choose BAD|Iron Head|p2a: Victreebel',
+      '|move|p1a: Golisopod|Iron Head|p2a: Victreebel\n|html|INJECT',
+      '|move|p1a: Golisopod|Iron Head|p2a: Victreebel|extra|INJECT',
+      '|-activate|p2a: Victreebel|move: Wide Guard|[from] <script>INJECT</script>',
+    );
+    const c = build(t);
+    expect(JSON.stringify(c.turn_outcomes)).not.toContain('INJECT');
+    expect(c.turn_outcomes_truncated).toBe(true);
+  });
+
+  it('外部来源（沙暴/异常）击倒不折叠进招式战果，先收束窗口再独立记录', () => {
+    const t = feed(mkTracker(),
+      '|move|p1b: Chandelure|Heat Wave|p2a: Victreebel|[spread] p2a,p2b',
+      '|-damage|p2a: Victreebel|5/100',
+      '|-damage|p2b: Charizard|44/100',
+      '|-weather|Sandstorm|[upkeep]',
+      '|-damage|p1b: Chandelure|0 fnt|[from] Sandstorm',
+      '|faint|p1b: Chandelure',
+      '|-damage|p2a: Victreebel|0 fnt|[from] Sandstorm',
+      '|faint|p2a: Victreebel',
+    );
+    const c = build(t);
+    expect(c.turn_outcomes).toEqual([
+      'T1 our Chandelure Heat Wave: hit foe Victreebel (100→5), hit foe Charizard (92→44)',
+      'T1 our Chandelure knocked out',
+      'T1 foe Victreebel knocked out',
+    ]);
+    expect(c.turn_outcomes_truncated).toBe(false);
+  });
+
+  it('特性/道具的降能力失败事件进入历史且不误标截断', () => {
+    const t = feed(mkTracker(),
+      '|-fail|p2a: Victreebel|unboost|atk|[from] ability: Oblivious|[of] p2a: Victreebel',
+    );
+    const c = build(t);
+    expect(c.turn_outcomes).toEqual([]);
+    expect(c.turn_outcomes_truncated).toBe(false);
+    expect(c.recent_turns.at(-1)!.events).toEqual([
+      '|-fail|p2a: Victreebel|unboost|atk|[from] ability: Oblivious|[of] p2a: Victreebel',
+    ]);
+    expect(c.history_truncated).toBe(false);
+  });
+
+  it('招式窗口内的降能力失败提示不写入招式战果', () => {
+    const t = feed(mkTracker(),
+      '|move|p1a: Golisopod|Iron Head|p2a: Victreebel',
+      '|-damage|p2a: Victreebel|50/100',
+      '|-fail|p2a: Victreebel|unboost|atk|[from] ability: Oblivious|[of] p2a: Victreebel',
+    );
+    expect(build(t).turn_outcomes).toEqual(['T1 our Golisopod Iron Head: hit foe Victreebel (100→50)']);
+  });
+});

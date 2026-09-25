@@ -127,6 +127,7 @@ export function mkDex(): DexData {
     heatwave: mkMove('Heat Wave', 'Fire', 95, 'Special', 'allAdjacentFoes'),
     trickroom: mkMove('Trick Room', 'Psychic', 0, 'Status', 'all'),
     protect: mkMove('Protect', 'Normal', 0, 'Status', 'self'),
+    endure: mkMove('Endure', 'Normal', 0, 'Status', 'self', 4),
     rockslide: mkMove('Rock Slide', 'Rock', 75, 'Physical', 'allAdjacentFoes'),
     knockoff: mkMove('Knock Off', 'Dark', 65, 'Physical'),
     icepunch: mkMove('Ice Punch', 'Ice', 75, 'Physical'),
@@ -164,6 +165,9 @@ export function mkDex(): DexData {
     flareblitz: mkMove('Flare Blitz', 'Fire', 120, 'Physical'),
     moonblast: mkMove('Moonblast', 'Fairy', 95, 'Special'),
     lastrespects: mkMove('Last Respects', 'Ghost', 50, 'Physical'),
+    eruption: mkMove('Eruption', 'Fire', 150, 'Special', 'allAdjacentFoes'),
+    waterspout: mkMove('Water Spout', 'Water', 150, 'Special', 'allAdjacentFoes'),
+    dragonenergy: mkMove('Dragon Energy', 'Dragon', 150, 'Special'),
   };
   const chart = normalizeTypechart({
     normal: {ghost: 0, rock: 0.5, steel: 0.5},

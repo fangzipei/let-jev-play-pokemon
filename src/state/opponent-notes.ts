@@ -1,6 +1,6 @@
 import {megaFormsOf, type DexData, type SpeciesInfo} from '../dex/index.js';
 import {priorEntryFor, type PriorEntry, type PriorMeta, type PriorPair} from '../dex/priors.js';
-import {queryForOpponent, type MemoryData} from '../learn/store.js';
+import {coreKey, queryForOpponent, type MemoryData, type SpeciesRecord} from '../learn/store.js';
 import {entryWeatherOf} from './calc.js';
 import {parseIdent, parseLine, toId} from './protocol.js';
 import {weatherDoublesSpeed} from './speed-control.js';
@@ -32,6 +32,22 @@ const RESULT_TYPES = new Set(['-damage', '-status', '-boost', '-fail', '-immune'
 const CONTROL_MOVE_SEMANTICS: Record<string, string> = {
   tailwind: "doubles its side's Speed for 4 turns when used",
   trickroom: 'makes slower Pokemon move first for 5 turns when used',
+};
+
+/**
+ * 群攻招式 id（英文名与 chamdb-priors SPREAD_MOVE_EN 翻译对齐）。
+ * 经 PS sim 数据验证 target 为 allAdjacentFoes/allAdjacent：均为同时命中双体。
+ */
+export const SPREAD_MOVE_IDS = new Set([
+  'expandingforce', 'hypervoice', 'heatwave', 'rockslide', 'blizzard', 'dazzlinggleam', 'snarl',
+  'sludgewave', 'earthquake', 'surf', 'boomburst', 'discharge', 'electroweb', 'makeitrain',
+  'burningjealousy', 'bulldoze', 'breakingswipe', 'petalblizzard', 'eruption', 'waterspout',
+  'icywind', 'muddywater', 'sparklingaria',
+]);
+
+/** 条件群攻招式的展开条件（默认单体，条件成立才命中双体）；注解用。 */
+export const SPREAD_MOVE_CONDITION: Record<string, string> = {
+  expandingforce: 'spread only while Psychic Terrain is active and the user is grounded',
 };
 
 /** 该个体所在侧的控速条件是否当前激活（tailwind 按侧、trickroom 全局） */
@@ -340,24 +356,159 @@ export function assumedNotes(
     if (own && own.percent > 0) notes.push(`commonly leads ${own.percent.toFixed(1)}% of its teams ${source}`);
   }
   const controlNotes = opts.state ? speedControlThreatNotes(p, entry, opts.state, source) : [];
-  notes.push(...controlNotes);
-  // 常规注解上限 4（Mega 威胁额外 +1）；控速威胁始终保留，不被截断
+  // 常规注解上限 4（Mega 威胁额外 +1）；控速威胁始终保留，不被截断（只在此处追加一次）
   return [...notes.slice(0, 4 + (megaNote ? 1 : 0)), ...controlNotes];
 }
 
-/** 对手预览的 leads 占比概览（team-preview INTRO 用），降序 top-N。 */
-export function leadPriorLines(priors: PriorMeta | null | undefined, speciesList: string[], limit = 3): string[] {
+export interface ExpectedFoeLead {
+  species: string;
+  /** 先验 lead 占比（0-100；无先验数据为 null） */
+  priorPercent: number | null;
+  /** 经验库中该物种作为首发的场次/观察场次/战绩（seen>=3 且 leads>0 才带） */
+  memoryLeads: number | null;
+  memorySeen: number | null;
+  memoryWins: number | null;
+  memoryLosses: number | null;
+}
+
+type SpeciesStats = Pick<SpeciesRecord, 'name' | 'seen' | 'wins' | 'losses' | 'leads'>;
+
+/**
+ * 经验库物种查询：先按基础形态键；经验库按揭示后的最终形态建键（Mega 后为 Mega 形态名），
+ * 未命中或并存时再用 dex 中全部 Mega 形态键合并求和；无记录返回 null。
+ */
+function memorySpeciesRecord(memory: MemoryData, dex: DexData | null | undefined, species: string): SpeciesStats | null {
+  const keys = new Set([toId(species)]);
+  if (dex) {
+    for (const mega of megaFormsOf(dex, species)) keys.add(toId(mega.name));
+  }
+  const found: SpeciesStats[] = [];
+  for (const key of keys) {
+    const record = memory.species[key];
+    if (record) found.push(record);
+  }
+  if (!found.length) return null;
+  return found.reduce((acc, record) => ({
+    name: acc.name,
+    seen: acc.seen + record.seen,
+    wins: acc.wins + record.wins,
+    losses: acc.losses + record.losses,
+    leads: acc.leads + record.leads,
+  }));
+}
+
+/**
+ * 预期对手首发：先验 lead 占比与经验库首发场次占比各自按名单内最大值归一化，取两来源较大值降序；
+ * 并列按队伍顺序；经验库 seen<3 或从未首发（leads=0）不参与，避免小样本噪声。
+ */
+export function expectedFoeLeads(
+  priors: PriorMeta | null | undefined,
+  memory: MemoryData | null | undefined,
+  speciesList: string[],
+  opts: {limit?: number; dex?: DexData | null} = {},
+): ExpectedFoeLead[] {
+  if (!speciesList.length) return [];
+  const rows = speciesList.map((species, index) => {
+    const entry = priors ? priorEntryFor(priors, species) : null;
+    const own = entry?.leads.find(l => toId(l.name) === toId(species));
+    const priorPercent = own && own.percent > 0 ? own.percent : null;
+    const record = memory ? memorySpeciesRecord(memory, opts.dex, species) : null;
+    const usable = record && record.seen >= 3 && record.leads > 0 ? record : null;
+    return {index, species, priorPercent,
+      memoryLeads: usable?.leads ?? null, memorySeen: usable?.seen ?? null,
+      memoryWins: usable?.wins ?? null, memoryLosses: usable?.losses ?? null};
+  });
+  const maxPrior = Math.max(0, ...rows.map(r => r.priorPercent ?? 0));
+  const share = (r: typeof rows[number]) => r.memoryLeads !== null && r.memorySeen ? r.memoryLeads / r.memorySeen : 0;
+  const maxShare = Math.max(0, ...rows.map(share));
+  const scored = rows
+    .filter(r => r.priorPercent !== null || r.memoryLeads !== null)
+    .map(r => ({lead: r, score: Math.max(
+      maxPrior > 0 ? (r.priorPercent ?? 0) / maxPrior : 0,
+      maxShare > 0 ? share(r) / maxShare : 0)}));
+  scored.sort((a, b) => b.score - a.score || a.lead.index - b.lead.index);
+  return scored.slice(0, opts.limit ?? 3).map(({lead}) => ({
+    species: lead.species, priorPercent: lead.priorPercent,
+    memoryLeads: lead.memoryLeads, memorySeen: lead.memorySeen,
+    memoryWins: lead.memoryWins, memoryLosses: lead.memoryLosses,
+  }));
+}
+
+/** 预期首发的 INTRO 行：`Rillaboom (prior lead rate 45.2%; led in 9 of 59 battles you played)`，来源各自标注。 */
+export function expectedFoeLeadLines(leads: ExpectedFoeLead[]): string[] {
+  return leads.map(lead => {
+    const parts = [
+      lead.priorPercent !== null ? `prior lead rate ${lead.priorPercent.toFixed(1)}%` : '',
+      lead.memoryLeads !== null && lead.memorySeen !== null ? `led in ${lead.memoryLeads} of ${lead.memorySeen} battles you played` : '',
+    ].filter(Boolean);
+    return `${lead.species} (${parts.join('; ')})`;
+  });
+}
+
+/** 交手战绩条（经验库 seen>=3，按观察场次降序）：`Rillaboom 27W-32L`；显示名用 preview 名单原文，兼容 Mega 形态键合并。 */
+export function speciesRecordLines(
+  memory: MemoryData | null | undefined,
+  speciesList: string[],
+  opts: {limit?: number; dex?: DexData | null} = {},
+): string[] {
+  if (!memory) return [];
+  const display = new Map(speciesList.map(s => [toId(s), s]));
+  return [...display.entries()]
+    .filter(([key]) => !!key)
+    .map(([, name]) => ({name, record: memorySpeciesRecord(memory, opts.dex, name)}))
+    .filter((e): e is {name: string; record: SpeciesStats} => !!e.record && e.record.seen >= 3)
+    .sort((a, b) => b.record.seen - a.record.seen)
+    .slice(0, opts.limit ?? 3)
+    .map(e => `${e.name} ${e.record.wins}W-${e.record.losses}L`);
+}
+
+/** 最常见对局组合（名单内双方、seen>=3、观察场次最多）：`Rillaboom+Sneasler 24 battles (12W-12L)`。 */
+export function topCoreLine(memory: MemoryData | null | undefined, speciesList: string[]): string | null {
+  if (!memory) return null;
+  const keys = [...new Set(speciesList.map(toId))].filter(Boolean);
+  let key: string | null = null;
+  let seen = 0;
+  for (let i = 0; i < keys.length; i++) {
+    for (let j = i + 1; j < keys.length; j++) {
+      const candidate = coreKey(keys[i], keys[j]);
+      const record = memory.cores[candidate];
+      if (record && record.seen >= 3 && record.seen > seen) {
+        key = candidate;
+        seen = record.seen;
+      }
+    }
+  }
+  if (!key) return null;
+  const record = memory.cores[key];
+  const [a, b] = key.split('+');
+  // 经验库缺该物种记录时用 preview 名单原文兜底，避免退化成小写 id
+  const display = new Map(speciesList.map(s => [toId(s), s]));
+  const nameA = memory.species[a]?.name ?? display.get(a) ?? a;
+  const nameB = memory.species[b]?.name ?? display.get(b) ?? b;
+  return `${nameA}+${nameB} ${record.seen} battles (${record.wins}W-${record.losses}L)`;
+}
+
+/** 对手预览的群攻威胁概览（team-preview INTRO 用）：每只取占比最高的群攻招式，降序 top-N。 */
+export function spreadThreatLines(priors: PriorMeta | null | undefined, speciesList: string[], limit = 3): string[] {
   if (!priors) return [];
-  return speciesList
-    .map(species => ({species, entry: priorEntryFor(priors, species)}))
-    .map(({species, entry}) => {
-      const own = entry?.leads.find(l => toId(l.name) === toId(species));
-      return own && own.percent > 0 ? {species, percent: own.percent} : null;
-    })
-    .filter((x): x is {species: string; percent: number} => x !== null)
+  const out: Array<{species: string; move: PriorPair; percent: number}> = [];
+  for (const species of speciesList) {
+    const entry = priorEntryFor(priors, species);
+    if (!entry) continue;
+    let best: PriorPair | null = null;
+    for (const mv of entry.moves) {
+      if (mv.percent <= 0 || !SPREAD_MOVE_IDS.has(toId(mv.name))) continue;
+      if (!best || mv.percent > best.percent) best = mv;
+    }
+    if (best) out.push({species, move: best, percent: best.percent});
+  }
+  return out
     .sort((a, b) => b.percent - a.percent)
     .slice(0, limit)
-    .map(x => `${x.species} ${x.percent.toFixed(1)}%`);
+    .map(x => {
+      const condition = SPREAD_MOVE_CONDITION[toId(x.move.name)];
+      return `${x.species} ${x.move.name} ${x.percent.toFixed(1)}%${condition ? ` (${condition})` : ''}`;
+    });
 }
 
 export function buildOpponentNotes(input: OpponentNotesInput): Record<string, OpponentNoteSet> {

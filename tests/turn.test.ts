@@ -79,6 +79,31 @@ describe('三类构造器复用分析', () => {
     expect(option?.label).toContain('incoming ≈63%');
     expect(option?.label).toContain('costs your action this turn');
   });
+  it('主攻属性被降时，招式选项带估算偏差提醒且换人选项带优先换人引导', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    const chandelure = tracker.state.sides.p1!.pokemon.find(p => p.species === 'Chandelure')!;
+    chandelure.boosts = {spa: -2};
+    const plans = buildTurnPlans({dex, request, tracker});
+    const slot2 = plans.find(p => p.slot === 2)!;
+    expect(slot2.options.find(o => o.key === 'move_1_foe_a')?.label).toMatch(/does not include stat stages/);
+    expect(slot2.options.find(o => o.key === 'switch_3')?.label).toContain('main special attacker');
+  });
+  it('戏法空间选项带我方慢速成员的收益事实（含在场标记与对手中性档位）', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const plans = buildTurnPlans({dex, request, tracker, analysis});
+    const slot2 = plans.find(p => p.slot === 2)!;
+    const tr = slot2.options.find(o => o.key === 'move_3')?.label ?? '';
+    expect(tr).toContain('under Trick Room your slower Pokemon act first');
+    expect(tr).toContain('Golisopod (estimated speed 60, on the field)');
+    expect(tr).toContain('Chandelure (estimated speed 100, on the field)');
+    expect(tr).toMatch(/would move before the foes/);
+    // 替补 Tyranitar 因讲究围巾×1.5（估计 123）高于 Victreebel 档位 122，Salamence 152 也不低于对手档位，均不入列
+    expect(tr).not.toContain('Tyranitar (estimated');
+    expect(tr).not.toContain('Salamence (estimated');
+  });
   it('强制换人复用分析，不说消耗行动，也不假定一定因倒下或在回合间发生', () => {
     const request = mkRequest({forceSwitch: [true, false]});
     const tracker = mkTracker();
@@ -136,10 +161,75 @@ describe('buildTurnPlans', () => {
     const heatWave = plans[1].options.find(o => o.key === 'move_2');
     expect(heatWave?.action).toEqual({kind: 'move', slot: 2, moveIndex: 2});
     expect(heatWave?.label).toContain('hits both foes');
+    expect(heatWave?.label).toMatch(/vs Foe A \(Victreebel, 100% HP\): ≈\d+% damage/);
+    expect(heatWave?.label).toMatch(/vs Foe B \(Charizard, 92% HP\): ≈\d+% damage/);
     // 单目标招式（Iron Head）为两个对手各生成一个选项
     const slot1Keys = plans[0].options.map(o => o.key);
     expect(slot1Keys).toContain('move_1_foe_a');
     expect(slot1Keys).toContain('move_1_foe_b');
+  });
+
+  it('只剩一个对手时群攻招式按单发标注，不再声称 both foes 0.75x', () => {
+    const tracker = mkTracker();
+    tracker.state.sides.p2.pokemon[1].fainted = true;
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker});
+    const heatWave = plans[1].options.find(o => o.key === 'move_2');
+    expect(heatWave?.label).not.toContain('hits both foes (0.75x spread)');
+    expect(heatWave?.label).toMatch(/remaining foe at full power/);
+    expect(heatWave?.label).toMatch(/vs Foe A \(Victreebel, 100% HP\): ≈\d+% damage \(2x\)/);
+  });
+
+  it('上一回合守过后不再提供守住选项，未守过则提供', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p1b: Chandelure|Protect|p1b: Chandelure');
+    tracker.handleLine('|turn|2');
+    const chained = buildTurnPlans({dex, request: mkRequest(), tracker});
+    expect(chained[1].options.map(o => o.key)).not.toContain('move_4');
+    const fresh = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    expect(fresh[1].options.map(o => o.key)).toContain('move_4');
+  });
+
+  it('间隔一回合后恢复提供守住选项（stall 计数已清除）', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p1b: Chandelure|Protect|p1b: Chandelure');
+    tracker.handleLine('|turn|2');
+    tracker.handleLine('|turn|3');
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker});
+    expect(plans[1].options.map(o => o.key)).toContain('move_4');
+  });
+
+  it('上一回合用过 Endure 后同样不再提供该选项（共享 stall 计数）', () => {
+    const request = mkRequest();
+    request.active![0].moves = [
+      {move: 'Endure', id: 'endure', pp: 10, maxpp: 10, target: 'self'},
+      {move: 'Iron Head', id: 'ironhead', pp: 15, maxpp: 15, target: 'normal'},
+    ];
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p1a: Golisopod|Endure|p1a: Golisopod');
+    tracker.handleLine('|turn|2');
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(plans[0].options.map(o => o.key)).not.toContain('move_1');
+    expect(plans[0].options.map(o => o.key)).toContain('move_2_foe_a');
+  });
+
+  it('被 Yawn 时回合指令警示下个结算回合睡着且换出可解除', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-start|p1a: Golisopod|move: Yawn|[of] p2a: Charizard');
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker});
+    for (const plan of plans) {
+      expect(plan.question.instructions).toContain('Yawn on our Golisopod');
+      expect(plan.question.instructions).toContain('falls asleep at the end of the next resolved turn');
+      expect(plan.question.instructions).toContain('switching out removes Yawn');
+    }
+    const fresh = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    expect(fresh[0].question.instructions).not.toContain('Yawn on our');
+  });
+
+  it('被 Yawn 的在场者使本槽位换人选项标注换出可解除睡眠', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-start|p1a: Golisopod|move: Yawn|[of] p2a: Charizard');
+    const option = buildTurnPlans({dex, request: mkRequest(), tracker})[0].options.find(o => o.key === 'switch_3');
+    expect(option?.label).toContain('switching this slot out removes Yawn from Golisopod before it falls asleep');
   });
 
   it('fainted 槽位不提问（服务器 auto-pass，提问会生成错位动作）', () => {
@@ -167,6 +257,16 @@ describe('buildTurnPlans', () => {
     const trickRoom = plans[1].options.find(o => o.key === 'move_3');
     expect(trickRoom?.label).toMatch(/5 turns/);
     expect(trickRoom?.label).toMatch(/priority bracket/);
+  });
+
+  it('喷火类招式按 request 当前血量折算真实威力', () => {
+    const request = mkRequest();
+    request.active![0].moves[0] = {move: 'Eruption', id: 'eruption', pp: 5, maxpp: 5, target: 'allAdjacentFoes'};
+    request.side.pokemon[0].moves = ['eruption', 'drillrun', 'leechlife', 'suckerpunch'];
+    request.side.pokemon[0].condition = '110/150';
+    const label = buildTurnPlans({dex, request, tracker: mkTracker()})[0].options.find(o => o.key === 'move_1')?.label;
+    expect(label).toContain('≈109 BP at your current 73% HP');
+    expect(label).toContain('hits both foes');
   });
 
   it('mega 选项标注时机引导：形态升级即刻生效、唯一且阵亡前未声明即浪费', () => {
@@ -225,6 +325,11 @@ describe('控速摘要注入 instructions', () => {
     expect(instructions).toContain('Your-side Tailwind is active with 3 more turns including this one');
     expect(instructions).toContain('Choose the action for slot 1');
   });
+  it('回合指令把换人定位为完整选项而非退路', () => {
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    expect(plans[0].question.instructions).toContain('full-strength option, not a fallback');
+    expect(plans[0].question.instructions).toMatch(/clear volatile conditions such as Yawn/);
+  });
   it('无任何控速时 instructions 不注入空话', () => {
     const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
     expect(plans[0].question.instructions).not.toContain('Speed control');
@@ -235,5 +340,64 @@ describe('控速摘要注入 instructions', () => {
     expect(plans[0].question.instructions).toContain('Speed control');
     expect(plans[0].question.instructions).toContain('Trick Room is active with 4 more turns including this one');
     expect(plans[0].question.instructions).toContain('This is slot 1');
+  });
+});
+
+describe('回合结果回顾与广域防守警示', () => {
+  it.each(['team-preview', 'turn', 'force-switch'] as const)('%s 的指令提及 turn_outcomes 累计实际结果', kind => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    const questions = kind === 'team-preview'
+      ? Object.values(buildPreviewQuestions({dex, request, opponentPreviewSpecies: []}).questions)
+      : (kind === 'turn' ? buildTurnPlans({dex, request, tracker})
+        : buildSwitchPlans({dex, request: {...request, forceSwitch: [true, true]}, tracker})).map(p => p.question);
+    expect(questions.length).toBeGreaterThan(0);
+    for (const question of questions) expect(question.instructions).toContain('turn_outcomes');
+  });
+
+  it('回合指令要求先回顾 battle_context 的本局实际结果', () => {
+    const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
+    expect(plans[0].question.instructions).toContain('battle_context.turn_outcomes');
+  });
+
+  it('对手已揭示 Wide Guard 时，L2 群攻选项标注可被完全挡下且可连续使用', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Wide Guard|p2b: Charizard');
+    tracker.handleLine('|turn|2');
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const plans = buildTurnPlans({dex, request, tracker, analysis});
+    const heatWave = plans[1].options.find(o => o.key === 'move_2');
+    expect(heatWave?.label).toContain('foe Charizard has revealed Wide Guard');
+    expect(heatWave?.label).toContain('last used on turn 1');
+    expect(heatWave?.label).toMatch(/0 damage/);
+    expect(heatWave?.label).toMatch(/no failure chance/);
+    expect(heatWave?.label).toMatch(/unlike Protect/);
+    const shadowBall = plans[1].options.find(o => o.key === 'move_1_foe_a');
+    expect(shadowBall?.label).not.toContain('Wide Guard');
+  });
+
+  it('Wide Guard 未揭示、使用者已倒下或非 L2 时不警示', () => {
+    const request = mkRequest();
+    const fresh = mkTracker();
+    fresh.handleLine('|turn|2');
+    let analysis = buildAnalysisContext({dex, request, state: fresh.state, level: 2});
+    expect(buildTurnPlans({dex, request, tracker: fresh, analysis})[1].options.find(o => o.key === 'move_2')?.label)
+      .not.toContain('Wide Guard');
+    const revealed = mkTracker();
+    revealed.handleLine('|move|p2b: Charizard|Wide Guard|p2b: Charizard');
+    revealed.handleLine('|turn|2');
+    revealed.state.sides.p2.pokemon[1].fainted = true;
+    analysis = buildAnalysisContext({dex, request, state: revealed.state, level: 2});
+    expect(buildTurnPlans({dex, request, tracker: revealed, analysis})[1].options.find(o => o.key === 'move_2')?.label)
+      .not.toContain('Wide Guard');
+    const l1 = mkTracker();
+    l1.handleLine('|move|p2b: Charizard|Wide Guard|p2b: Charizard');
+    l1.handleLine('|turn|2');
+    analysis = buildAnalysisContext({dex, request, state: l1.state, level: 1});
+    expect(buildTurnPlans({dex, request, tracker: l1, analysis})[1].options.find(o => o.key === 'move_2')?.label)
+      .not.toContain('Wide Guard');
+    expect(buildTurnPlans({dex, request, tracker: l1})[1].options.find(o => o.key === 'move_2')?.label)
+      .not.toContain('Wide Guard');
   });
 });

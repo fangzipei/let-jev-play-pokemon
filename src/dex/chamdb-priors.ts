@@ -21,6 +21,40 @@ const CONTROL_MOVE_EN: Record<string, string> = {
   'トリックルーム': 'Trick Room',
 };
 
+/**
+ * 群攻（AOE）招式日文名 → 英文名（消费端以 toId 匹配）。
+ * 英文名均经 PS sim 数据验证 target 为 allAdjacentFoes/allAdjacent；'ワイドフォース' 为
+ * 条件群攻（默认单体，仅精神场地展开），由消费端额外标注。
+ */
+export const SPREAD_MOVE_EN: Record<string, string> = {
+  'ワイドフォース': 'Expanding Force',
+  'ハイパーボイス': 'Hyper Voice',
+  'ねっぷう': 'Heat Wave',
+  'いわなだれ': 'Rock Slide',
+  'ふぶき': 'Blizzard',
+  'マジカルシャイン': 'Dazzling Gleam',
+  'バークアウト': 'Snarl',
+  'ヘドロウェーブ': 'Sludge Wave',
+  'じしん': 'Earthquake',
+  'なみのり': 'Surf',
+  'ばくおんぱ': 'Boomburst',
+  'ほうでん': 'Discharge',
+  'エレキネット': 'Electroweb',
+  'ゴールドラッシュ': 'Make It Rain',
+  'もえるねたみ': 'Burning Jealousy',
+  'じならし': 'Bulldoze',
+  'ワイドブレイカー': 'Breaking Swipe',
+  'はなふぶき': 'Petal Blizzard',
+  'ふんか': 'Eruption',
+  'しおふき': 'Water Spout',
+  'こごえるかぜ': 'Icy Wind',
+  'だくりゅう': 'Muddy Water',
+  'うたかたのアリア': 'Sparkling Aria',
+};
+
+/** 招式日文名 → 英文名统一翻译表（控速 + 群攻）。 */
+const MOVE_EN: Record<string, string> = {...CONTROL_MOVE_EN, ...SPREAD_MOVE_EN};
+
 /** 天气速度特性日文名 → 英文名（消费端 weatherDoublesSpeed 以 toId 匹配）。 */
 const WEATHER_SPEED_ABILITY_EN: Record<string, string> = {
   'すいすい': 'Swift Swim',
@@ -120,7 +154,7 @@ export async function loadChamdbPriors(opts: LoadChamdbPriorsOptions): Promise<P
     bySpecies[slug.replace(/-/g, '')] = {
       items: variant.items.map(item => toItemPair(item, itemsIndex)),
       abilities: variant.abilities.map(ability => toPair(ability, abilitiesIndex, WEATHER_SPEED_ABILITY_EN)),
-      moves: variant.moves.map(move => toPair(move, movesIndex, CONTROL_MOVE_EN)),
+      moves: variant.moves.map(move => toPair(move, movesIndex, MOVE_EN)),
       leads: [],
     };
   }

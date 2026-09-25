@@ -6,7 +6,7 @@ import type {Answer, DecisionsUsage, Question} from '../jev/types.js';
 import type {Logger} from '../log/logger.js';
 import {buildChooseCommand, validateActions, type ChooseAction} from '../ps/choose.js';
 import type {BattleRequest} from '../state/request.js';
-import {buildOpponentNotes, leadPriorLines} from '../state/opponent-notes.js';
+import {buildOpponentNotes, spreadThreatLines} from '../state/opponent-notes.js';
 import {buildStatePayload} from '../state/serialize.js';
 import type {PriorMeta} from '../dex/priors.js';
 import type {MemoryData} from '../learn/store.js';
@@ -199,7 +199,8 @@ async function runWithJev(
   let questions: Record<string, Question> = kind === 'team-preview' ? buildPreviewQuestions({
     dex: ctx.dex, request: ctx.request, analysis,
     opponentPreviewSpecies: opponentSpecies,
-    opponentLeadPriors: leadPriorLines(ctx.priors, opponentSpecies),
+    memory: ctx.memory,
+    opponentSpreadThreats: spreadThreatLines(ctx.priors, opponentSpecies),
     priors: ctx.priors,
   }).questions : Object.fromEntries(plans.map(plan => [plan.questionName, plan.question]));
   if (!Object.keys(questions).length) throw new Error(`没有可提交给 jev 的 ${kind} 问题`);

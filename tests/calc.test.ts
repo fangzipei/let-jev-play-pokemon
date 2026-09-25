@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {effectiveness, entryWeatherOf, estimateDamagePercent, normalizeTypechart, speedNote, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -107,8 +107,41 @@ describe('estimateDamagePercent', () => {
     expect(sunny).toBeGreaterThan(rainy * 3);
     expect(sunny).toBeGreaterThan(bare * 10);
   });
+  it('适应力特性把本系加成提升到 2.0x，非本系招式不受影响', () => {
+    const base = {dex, moveId: 'ironhead', attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, defenderSpecies: 'Metagross'};
+    const normal = estimateDamagePercent(base)!;
+    const adaptability = estimateDamagePercent({...base, attackerAbility: 'adaptability'})!;
+    expect(adaptability).toBeGreaterThan(normal);
+    expect(adaptability / normal).toBeGreaterThan(1.25);
+    const offType = estimateDamagePercent({...base, moveId: 'drillrun'})!;
+    expect(estimateDamagePercent({...base, moveId: 'drillrun', attackerAbility: 'adaptability'})).toBe(offType);
+  });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();
+  });
+});
+
+describe('hpScaledBasePower（喷火/喷水/龙之能量按自身血量缩放）', () => {
+  const dex = mkDex();
+  it('按当前血量等比缩放基础威力并向下取整', () => {
+    expect(hpScaledBasePower(dex, 'eruption', 73)).toBe(109);
+    expect(hpScaledBasePower(dex, 'waterspout', 50)).toBe(75);
+    expect(hpScaledBasePower(dex, 'dragonenergy', 100)).toBe(150);
+    expect(hpScaledBasePower(dex, 'eruption', 1)).toBe(1);
+    expect(hpScaledBasePower(dex, 'eruption', 0)).toBe(0);
+    expect(hpScaledBasePower(dex, 'eruption', 120)).toBe(150);
+  });
+  it('非缩放招式或缺招式数据返回 null', () => {
+    expect(hpScaledBasePower(dex, 'heatwave', 50)).toBeNull();
+    expect(hpScaledBasePower({...dex, moves: {}}, 'eruption', 50)).toBeNull();
+  });
+});
+
+describe('neutralSpeedTier（中性满投资速度档位）', () => {
+  it.each([
+    [120, 172], [20, 72], [60, 112], [80, 132], [78, 130],
+  ])('种族值 %i → %i', (base, tier) => {
+    expect(neutralSpeedTier(base)).toBe(tier);
   });
 });
 

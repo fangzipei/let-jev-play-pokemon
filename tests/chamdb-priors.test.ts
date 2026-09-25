@@ -2,7 +2,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {describe, expect, it} from 'vitest';
-import {loadChamdbPriors} from '../src/dex/chamdb-priors.js';
+import {SPREAD_MOVE_EN, loadChamdbPriors} from '../src/dex/chamdb-priors.js';
+import {SPREAD_MOVE_IDS} from '../src/state/opponent-notes.js';
+import {toId} from '../src/state/protocol.js';
 
 const UPDATED = '2026-09-24T00:43:26.072+00:00';
 
@@ -64,7 +66,11 @@ async function seed(dir: string, opts: {notes?: boolean; legacyMoveNotes?: boole
     slug: 'rotom-wash',
     variants: {'M-6:double': {
       seasonId: 'M-6', format: 'double', rank: 2, pokemonJa: 'ウォッシュロトム', pokemonSlug: 'rotom-wash', dexNo: 479,
-      moves: [{rank: 1, percentage: 88.4, name: 'ハイドロポンプ'}],
+      moves: [
+        {rank: 1, percentage: 88.4, name: 'ハイドロポンプ'},
+        {rank: 2, percentage: 22.8, name: 'ほうでん'},
+        {rank: 3, percentage: 12.6, name: 'ワイドフォース'},
+      ],
       items: [], abilities: [], natures: [], evs: [], partners: [], updatedAt: UPDATED,
     }},
   });
@@ -83,6 +89,8 @@ async function seed(dir: string, opts: {notes?: boolean; legacyMoveNotes?: boole
       'おいかぜ': "Doubles allies' Speed for 4 turns.",
       'トリックルーム': 'For 5 turns, slower Pokémon move first.',
       'グラススライダー': 'Grassy Glide description text. Second sentence is dropped.',
+      'ほうでん': 'Hits all opponents.',
+      'ワイドフォース': 'In Psychic Terrain, a grounded user gains 1.5× power and hits all opponents.',
     });
   }
 }
@@ -121,8 +129,12 @@ describe('loadChamdbPriors', () => {
     expect(obon?.gloss).toHaveLength(90);
     expect(obon?.gloss?.endsWith('…')).toBe(true);
     expect(rilla.leads).toEqual([]);
-    // slug 含连字符 → 去连字符物种键；榜单中有、明细缺失的物种跳过
-    expect(meta!.bySpecies.rotomwash?.moves).toEqual([{name: 'ハイドロポンプ', percent: 88.4}]);
+    // slug 含连字符 → 去连字符物种键；榜单中有、明细缺失的物种跳过；群攻招式键翻英文
+    expect(meta!.bySpecies.rotomwash?.moves).toEqual([
+      {name: 'ハイドロポンプ', percent: 88.4},
+      {name: 'Discharge', percent: 22.8, gloss: 'Hits all opponents.'},
+      {name: 'Expanding Force', percent: 12.6, gloss: 'In Psychic Terrain, a grounded user gains 1.5× power and hits all opponents.'},
+    ]);
     expect(meta!.bySpecies.metagross).toBeUndefined();
   });
   it('兼容旧缓存文件名 move-notes-en.json', async () => {
@@ -145,5 +157,8 @@ describe('loadChamdbPriors', () => {
     await seed(dir);
     const meta = await loadChamdbPriors({cacheDir: dir, limit: 1});
     expect(Object.keys(meta!.bySpecies)).toEqual(['rillaboom']);
+  });
+  it('群攻译表与消费端 id 集双向对齐（防止两处手工清单静默漂移）', () => {
+    expect(new Set(Object.values(SPREAD_MOVE_EN).map(toId))).toEqual(SPREAD_MOVE_IDS);
   });
 });
