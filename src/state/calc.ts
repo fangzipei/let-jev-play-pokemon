@@ -1,7 +1,8 @@
-import type {DexData} from '../dex/index.js';
+import {megaFormsOf, type DexData} from '../dex/index.js';
 import {toId} from './protocol.js';
 
-const TYPE_IDS = new Set('normal fire water electric grass ice fighting poison ground flying psychic bug rock ghost dragon dark steel fairy stellar'.split(' '));
+const TYPE_ORDER = 'normal fire water electric grass ice fighting poison ground flying psychic bug rock ghost dragon dark steel fairy stellar'.split(' ');
+const TYPE_IDS = new Set(TYPE_ORDER);
 
 /** 把任意视角的 typechart 归一化为 [攻击属性][防守属性] = 倍率 */
 export function normalizeTypechart(raw: Record<string, unknown>): Record<string, Record<string, number>> {
@@ -57,6 +58,21 @@ export function effectiveness(dex: DexData, moveType: string, defenderTypes: str
   return mult;
 }
 
+/** 该属性克制（≥2x）的防守属性列表，按属性表顺序；行数据缺失时返回空数组，不猜。 */
+export function superEffectiveTypes(dex: DexData, moveType: string): string[] {
+  const row = dex.typechart[toId(moveType)];
+  if (!row || !Object.keys(row).length || !TYPE_IDS.has(toId(moveType))) return [];
+  return TYPE_ORDER.filter(t => t !== 'stellar' && effectiveness(dex, moveType, [t]) >= 2)
+    .map(t => t[0]!.toUpperCase() + t.slice(1));
+}
+
+/** 克制列表的可读短语（"Grass, Fighting and Bug"）；无数据时 null。 */
+export function superEffectivePhrase(dex: DexData, moveType: string): string | null {
+  const list = superEffectiveTypes(dex, moveType);
+  if (!list.length) return null;
+  return list.length === 1 ? list[0]! : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
 /** 稀疏倍率表的缺省项是中性；整行或物种属性缺失则不能推断。 */
 export function knownEffectiveness(dex: DexData, moveType: string, defenderTypes: string[]): number | null {
   const row = dex.typechart[toId(moveType)];
@@ -78,6 +94,35 @@ export function weatherAdjustedType(moveId: string, moveType: string, weather: s
   return moveType;
 }
 
+/** -ate 皮肤特性：一般系招式转指定属性，威力 1.2x（PS onModifyType + onBasePower） */
+const SKIN_TYPES: Record<string, string> = {
+  aerilate: 'Flying', pixilate: 'Fairy', refrigerate: 'Ice', galvanize: 'Electric',
+};
+
+/**
+ * 估算用招式属性与威力修正：气象球随天气改属性并翻倍（50 → 100），
+ * -ate 特性把仍为一般系的招式转为其皮肤属性并给 1.2x 威力；两者不叠加。
+ */
+export function estimatedMove(moveId: string, moveType: string, weather: string | undefined,
+  ability: string | undefined): {type: string; powerMultiplier: number} {
+  const weatherType = weatherAdjustedType(moveId, moveType, weather);
+  const multiplier = weatherType !== moveType ? 2 : 1;
+  const skin = SKIN_TYPES[toId(ability ?? '')];
+  if (skin && toId(weatherType) === 'normal') return {type: skin, powerMultiplier: multiplier * 1.2};
+  return {type: weatherType, powerMultiplier: multiplier};
+}
+
+/** Mega 形态的 -ate 皮肤特性（Aerilate/Pixilate 等）；无 Mega 石、形态不匹配或特性数据缺失时 null */
+export function megaSkinAbility(dex: DexData, species: string, item?: string): string | null {
+  if (!item) return null;
+  for (const form of megaFormsOf(dex, species)) {
+    if (toId(form.requiredItem ?? '') !== toId(item)) continue;
+    const skin = Object.values(form.abilities).map(toId).find(a => SKIN_TYPES[a]);
+    if (skin) return skin;
+  }
+  return null;
+}
+
 /** 入场即造天气的特性 → 天气词；用于预览/对位时推定该宝可梦自造天气下的气象球属性 */
 const ENTRY_WEATHER: Record<string, string> = {
   drought: 'Sun', drizzle: 'Rain', sandstream: 'Sandstorm', snowwarning: 'Snow',
@@ -92,7 +137,7 @@ export interface DamageEstimateInput {
   moveId: string;
   attackerTypes: string[];
   attackerStats?: Record<string, number>;
-  /** 攻击方当前特性（Adaptability 把本系加成从 1.5x 提到 2.0x） */
+  /** 攻击方当前特性：Adaptability 把本系加成提到 2.0x；-ate 皮肤（Aerilate 等）转换一般系招式属性并加 1.2x 威力 */
   attackerAbility?: string;
   defenderSpecies: string;
   isSpread?: boolean;
@@ -111,9 +156,9 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   if (!move || !def) return null;
   const basePower = input.powerOverride ?? move.basePower;
   if (!basePower || basePower <= 0) return null;
-  // 气象球随天气改属性并在有天气时威力翻倍（50 → 100）
-  const moveType = weatherAdjustedType(input.moveId, move.type, input.weather);
-  const power = moveType === move.type ? basePower : basePower * 2;
+  // 气象球随天气改属性翻倍；-ate 皮肤把一般系招式转属性并加 1.2x 威力
+  const {type: moveType, powerMultiplier} = estimatedMove(input.moveId, move.type, input.weather, input.attackerAbility);
+  const power = basePower * powerMultiplier;
   const eff = knownEffectiveness(input.dex, moveType, def.types);
   if (eff === null) return null;
   if (eff === 0) return 0;

@@ -212,6 +212,16 @@ describe('describeMoveOption', () => {
     });
     expect(text).toContain('status move');
   });
+
+  it('皮肤特性（Aerilate）下头部与伤害估算按转换后属性与 1.2x 威力显示，无皮肤保持原样', () => {
+    const base = {dex, moveId: 'hypervoice', moveName: 'Hyper Voice', pp: 10, maxpp: 10,
+      attackerTypes: ['Dragon', 'Flying'], attackerStats: {spa: 100},
+      target: {label: 'Foe A', species: 'Rillaboom', hpPercent: 100}};
+    const text = describeMoveOption({...base, attackerAbility: 'aerilate'});
+    expect(text).toContain('Hyper Voice [Flying/Special/108BP/PP 10/10]');
+    expect(text).toContain('≈98% damage');
+    expect(describeMoveOption(base)).toContain('Hyper Voice [Normal/Special/90BP/PP 10/10]');
+  });
 });
 
 describe('describeMoveOption 战术注解', () => {
@@ -244,6 +254,46 @@ describe('describeMoveOption 战术注解', () => {
     expect(three).toMatch(/50 per fainted ally/);
     const pct = (t: string) => Number(/≈(\d+)% damage/.exec(t)?.[1] ?? NaN);
     expect(pct(three)).toBeGreaterThan(pct(zero));
+  });
+  it('Coil 注解基础效果，并按在场物攻手数量分层提升价值', () => {
+    const base = {dex, moveId: 'coil', moveName: 'Coil', pp: 20, maxpp: 20, attackerTypes: ['Water']};
+    const two = describeMoveOption({...base, physicalFoes: 2});
+    expect(two).toContain("Coil raises the user's Attack, Defense and accuracy by one stage each");
+    expect(two).toContain('both active foes look like physical attackers');
+    const one = describeMoveOption({...base, physicalFoes: 1});
+    expect(one).toContain('one active foe looks like a physical attacker');
+    expect(one).not.toContain('both active foes');
+    const zero = describeMoveOption({...base, physicalFoes: 0});
+    expect(zero).toContain("Coil raises the user's Attack, Defense and accuracy by one stage each");
+    expect(zero).not.toContain('physical attacker');
+    expect(describeMoveOption(base)).not.toContain('physical attacker');
+  });
+  it('Coil 追加命中收益：有催眠/浊流时说明命中提升与强化持续期', () => {
+    const base = {dex, moveId: 'coil', moveName: 'Coil', pp: 20, maxpp: 20, attackerTypes: ['Water']};
+    const withMoves = describeMoveOption({...base, attackerMoves: ['muddywater', 'coil', 'hypnosis', 'recover']});
+    expect(withMoves).toContain("raises Hypnosis's hit rate from 60% to 80%");
+    expect(withMoves).toContain('perfect accuracy');
+    expect(withMoves).toContain('persist until this Pokemon switches out');
+    const noHypnosis = describeMoveOption({...base, attackerMoves: ['muddywater', 'coil', 'recover']});
+    expect(noHypnosis).not.toContain('Hypnosis');
+  });
+  it('催眠术选项：命中率与睡眠回合说明；持 Coil 时给出强化配合', () => {
+    const base = {dex, moveId: 'hypnosis', moveName: 'Hypnosis', pp: 20, maxpp: 20, attackerTypes: ['Water']};
+    const plain = describeMoveOption(base);
+    expect(plain).toMatch(/60% accuracy/);
+    expect(plain).toMatch(/1-3 turns/);
+    expect(plain).not.toContain('80%');
+    const withCoil = describeMoveOption({...base, attackerMoves: ['muddywater', 'coil', 'hypnosis', 'recover']});
+    expect(withCoil).toContain('raises it to 80%');
+  });
+  it('戏法选项：持讲究围巾时说明锁定对手、自身解锁与目标选择', () => {
+    const base = {dex, moveId: 'trick', moveName: 'Trick', pp: 10, maxpp: 10, attackerTypes: ['Psychic'], attackerItem: 'Choice Scarf'};
+    const text = describeMoveOption(base);
+    expect(text).toMatch(/locked into repeating that move/);
+    expect(text).toMatch(/can select any move again/);
+    expect(text).toMatch(/prefer a target/);
+    const nonChoice = describeMoveOption({...base, attackerItem: 'Leftovers'});
+    expect(nonChoice).not.toMatch(/locked into repeating/);
   });
   it('晴天下水系伤害招式标注减半', () => {
     const base = {dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
@@ -387,6 +437,15 @@ describe('describeSwitchOption', () => {
     expect(forced).not.toContain('cannot act this turn');
     expect(forced).toContain('forced replacement');
   });
+  it('换入者的入场特性：重设场地/天气是抢回控制权的手段', () => {
+    const request = mkRequest();
+    const ttar = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: []});
+    expect(ttar).toContain('on entry this Pokemon re-sets sandstorm');
+    const indeedee = {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '167/167', active: false, ability: 'Psychic Surge'};
+    const text = describeSwitchOption({dex, pokemon: indeedee, opponentActives: []});
+    expect(text).toContain('on entry this Pokemon re-sets Psychic Terrain');
+    expect(text).toMatch(/win the terrain back/);
+  });
 });
 
 describe('主攻属性被降：换人强化行与招式估算偏差提醒', () => {
@@ -480,6 +539,22 @@ describe('describePreviewCandidate', () => {
     expect(text).toMatch(/likely-form coverage: Heat Wave \(Fire\) hits likely Golisopod-Mega \[Bug\/Steel\] 4x ≈\d+% \(98\.6% Mega-stone prior, rough estimate\)/);
     const none = describePreviewCandidate({dex, pokemon: request.side.pokemon[1], opponentPreviewSpecies: ['Golisopod'], megaCapable: false});
     expect(none).not.toContain('likely-form coverage');
+  });
+  it('可 Mega 的皮肤型槽位（Salamencite→Aerilate）按 post-Mega 属性计入 best/覆盖率并显式标注', () => {
+    const request = mkRequest();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[3], // Salamence：Hyper Voice 在 Mega 后为飞行系
+      opponentPreviewSpecies: ['Rillaboom', 'Sneasler'],
+      megaCapable: true,
+    });
+    expect(text).toContain('best: Hyper Voice (Flying post-Mega) hits 2/2 foes super effectively');
+    expect(text).toContain('top ≈122% vs Rillaboom');
+    const coverage = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[3], opponentPreviewSpecies: ['Rillaboom'],
+      megaCapable: true,
+      likelyMegaFoes: [{species: 'Rillaboom', name: 'Rillaboom-Mega', types: ['Grass'], percent: 50}],
+    });
+    expect(coverage).toContain('Hyper Voice (Flying post-Mega) and Flamethrower (Fire) hit likely Rillaboom-Mega [Grass] 2x');
   });
   it('Drought 持有者的气象球按晴天火属性计入 likely-form coverage 并与火招并列', () => {
     const data = mkDex();
@@ -579,6 +654,16 @@ describe('describePreviewCandidate as a lead 评估行', () => {
       analysis, teamSlot: 1,
     });
     expect(noIntel).not.toContain('as a lead:');
+  });
+
+  it('皮肤型 Mega 槽位对预期首发的超效行标注 post-Mega', () => {
+    const {request, analysis} = mkAnalysis();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[3], opponentPreviewSpecies: previewFoes, megaCapable: true,
+      analysis, teamSlot: 4,
+      leadIntel: {foeLeads: [{species: 'Rillaboom', types: ['Grass'], memory: null}]},
+    });
+    expect(text).toContain('hits Rillaboom 2x (Hyper Voice post-Mega)');
   });
 });
 
@@ -822,6 +907,7 @@ describe('控速剩余回合注入', () => {
     expect(withFoeTw).toContain("the foe's Tailwind is active");
     expect(withFoeTw).toMatch(/inverts the acting order/);
     expect(withFoeTw).toMatch(/doubled Speed would work against them/);
+    expect(withFoeTw).toContain("the foe's Tailwind is active (3 more turns including this one)");
     const noTw = describeMoveOption({...base, speedControl: emptySpeedControl});
     expect(noTw).not.toContain("the foe's Tailwind is active");
     const activeTr = describeMoveOption({...base, speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 4}, opponent_tailwind: {started_turn: 2, turns_left: 3}}});
@@ -862,6 +948,7 @@ describe('戏法空间收益事实注解', () => {
     expect(text).not.toContain('Salamence (estimated');
     expect(text).toContain("both foes' neutral full-investment tiers (Victreebel 122, Charizard 152)");
     expect(text).toMatch(/would move before the foes/);
+    expect(text).toContain('for its 5 turns');
   });
 
   it('残局只剩一个对手时改用单数基准与 remaining foe', () => {
@@ -959,11 +1046,11 @@ describe('喷火类招式：血量缩放威力与出手顺序注解', () => {
     };
     analysis.ourSpeeds[0].speed = 36;
     const slower = describeMoveOption(base);
-    expect(slower).toContain('under the active Trick Room your estimated speed 36 acts before Victreebel (neutral full-investment 172)');
+    expect(slower).toContain('Trick Room is active with 4 more turns including this one (slower Pokemon move first): your estimated speed 36 would act before Victreebel (neutral full-investment 172)');
     expect(slower).not.toContain('outruns');
     analysis.ourSpeeds[0].speed = 200;
     const faster = describeMoveOption(base);
-    expect(faster).toContain('under the active Trick Room the slower side moves first: Victreebel (neutral full-investment 172) would likely act before your estimated speed 200');
+    expect(faster).toContain('Trick Room is active with 4 more turns including this one (slower Pokemon move first): Victreebel (neutral full-investment 172) would likely act before your estimated speed 200');
     expect(faster).not.toContain('outruns');
   });
   it('非缩放招式或缺省血量参数时不输出缩放与速度注解', () => {
@@ -983,5 +1070,80 @@ describe('喷火类招式：血量缩放威力与出手顺序注解', () => {
     });
     expect(legacy).not.toContain('scales with your HP');
     expect(legacy).not.toContain('outruns');
+  });
+});
+
+describe('控速下的出手顺序结论', () => {
+  const analysisWith = (ourSpeed: number) => {
+    const analysis = buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 1});
+    analysis.ourSpeeds[0].speed = ourSpeed;
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    return analysis;
+  };
+  const heatWaveLabel = (extra: Partial<Parameters<typeof describeMoveOption>[0]>) => describeMoveOption({
+    dex, moveId: 'heatwave', moveName: 'Heat Wave', pp: 10, maxpp: 10,
+    attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 145},
+    target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, ident: 'p2: Victreebel'},
+    ...extra,
+  });
+
+  it('无控速时不输出出手顺序结论', () => {
+    const label = heatWaveLabel({analysis: analysisWith(36), attackerSlot: 1});
+    expect(label).not.toContain('would act before');
+    expect(label).not.toContain('would likely act before');
+    expect(label).toContain('move order unknown');
+  });
+  it('Trick Room 激活时普通招式也直接给出反转后的先后与剩余回合', () => {
+    const control = {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 2}};
+    const slower = heatWaveLabel({analysis: analysisWith(36), attackerSlot: 1, speedControl: control});
+    expect(slower).toContain('Trick Room is active with 2 more turns including this one (slower Pokemon move first): your estimated speed 36 would act before Victreebel (neutral full-investment 172)');
+    expect(slower).toContain('move order is resolved below under the active speed control');
+    expect(slower).not.toContain('move order unknown');
+    const faster = heatWaveLabel({analysis: analysisWith(200), attackerSlot: 1, speedControl: control});
+    expect(faster).toContain('Trick Room is active with 2 more turns including this one (slower Pokemon move first): Victreebel (neutral full-investment 172) would likely act before your estimated speed 200');
+  });
+  it('对手顺风激活时按翻倍后的速度给出先后与剩余回合', () => {
+    const control = {...emptySpeedControl, opponent_tailwind: {started_turn: 2, turns_left: 3}};
+    const outrun = heatWaveLabel({analysis: analysisWith(320), attackerSlot: 1, speedControl: control});
+    expect(outrun).toContain("the foe's Tailwind is active with 3 more turns including this one (doubling their Speed): Victreebel (neutral full-investment 172, doubled to 344) would likely act before your estimated speed 320");
+    const stillFirst = heatWaveLabel({analysis: analysisWith(400), attackerSlot: 1, speedControl: control});
+    expect(stillFirst).toContain("the foe's Tailwind is active with 3 more turns including this one (doubling their Speed): your estimated speed 400 would act before Victreebel (neutral full-investment 172, doubled to 344)");
+  });
+  it('我方顺风激活时同样给出先后与剩余回合', () => {
+    const label = heatWaveLabel({
+      analysis: analysisWith(200), attackerSlot: 1,
+      speedControl: {...emptySpeedControl, our_tailwind: {started_turn: 2, turns_left: 2}},
+    });
+    expect(label).toContain('your Tailwind is active with 2 more turns including this one (doubling your Speed): your estimated speed 200 would act before Victreebel (neutral full-investment 172)');
+  });
+  it('未激活顺风时给出开顺风的前瞻结论：翻倍后能先手谁、还是追不上谁', () => {
+    const tailwind = (ownSpeed: number, extra: Partial<Parameters<typeof describeMoveOption>[0]> = {}) => describeMoveOption({
+      dex, moveId: 'tailwind', moveName: 'Tailwind', pp: 15, maxpp: 15, attackerTypes: ['Flying'],
+      analysis: analysisWith(ownSpeed), attackerSlot: 1, speedControl: emptySpeedControl,
+      activeFoes: ['p2: Victreebel'], ...extra,
+    });
+    expect(tailwind(200)).toContain('setting Tailwind now doubles your estimated speed 200 to 400, which would act before Victreebel (neutral full-investment 172)');
+    expect(tailwind(36)).toContain('setting Tailwind now doubles your estimated speed 36 to 72, still below Victreebel (neutral full-investment 172)');
+    expect(tailwind(200, {speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 2}}})).not.toContain('setting Tailwind now');
+  });
+  it('空间与对手顺风同时激活时两段状态都带剩余回合', () => {
+    const label = heatWaveLabel({
+      analysis: analysisWith(200), attackerSlot: 1,
+      speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 1}, opponent_tailwind: {started_turn: 2, turns_left: 2}},
+    });
+    expect(label).toContain("Trick Room is active with 1 more turn including this one (slower Pokemon move first); the foe's Tailwind is active with 2 more turns including this one (doubling their Speed): your estimated speed 200 would act before Victreebel (neutral full-investment 172, doubled to 344)");
+  });
+  it('无目标招式（自身招式）只对在场对手出结论，不含未上场替补', () => {
+    const label = describeMoveOption({
+      dex, moveId: 'trickroom', moveName: 'Trick Room', pp: 5, maxpp: 5,
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 145},
+      analysis: analysisWith(100), attackerSlot: 1,
+      speedControl: {...emptySpeedControl, trick_room: {started_turn: 3, turns_left: 2}},
+      activeFoes: ['p2: Victreebel'],
+    });
+    expect(label).toContain('Trick Room is active with 2 more turns including this one (slower Pokemon move first): your estimated speed 100 would act before Victreebel (neutral full-investment 172)');
+    expect(label).not.toContain('Sneasler (neutral full-investment');
+    expect(label).not.toContain('would act before Sneasler');
+    expect(label).not.toContain('Sneasler base speed');
   });
 });

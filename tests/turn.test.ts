@@ -43,6 +43,26 @@ describe('三类构造器复用分析', () => {
     const mega = buildTurnPlans({dex: data, request, tracker: mkTracker()})[0].options.find(o => o.key === 'move_1_foe_a_mega');
     expect(mega?.label).toContain('Charizard-Mega-Y');
   });
+  it('皮肤型 Mega（Salamencite→Aerilate）的 mega 变体按 post-Mega 属性显示，普通选项保持当前形态', () => {
+    const request = mkRequest();
+    request.side.pokemon[0] = {
+      ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true,
+      stats: {atk: 135, def: 100, spa: 165, spd: 100, spe: 152},
+      moves: ['protect', 'hypervoice', 'dracometeor', 'flamethrower'],
+      item: 'salamencite', ability: 'intimidate',
+    };
+    request.active![0] = {moves: [
+      {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      {move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+    ], canMegaEvo: true};
+    const options = buildTurnPlans({dex, request, tracker: mkTracker()})[0].options;
+    expect(options.find(o => o.key === 'move_2')?.label).toContain('Hyper Voice [Normal/Special/90BP');
+    expect(options.find(o => o.key === 'move_2_mega')?.label).toContain('Hyper Voice [Flying/Special/108BP');
+    // 飞行打击面说明：转换后属性及其克制属性列表由 type chart 驱动
+    expect(options.find(o => o.key === 'move_2_mega')?.label)
+      .toContain('post-Mega this move becomes Flying-type and is super effective against Grass, Fighting and Bug foes');
+    expect(options.find(o => o.key === 'move_2')?.label).not.toContain('post-Mega this move becomes');
+  });
   it('preview 四题同批独立描述组合意图，不声称看到前题答案且保持 keys', () => {
     const request = mkRequest({teamPreview: true});
     const result = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard']});
@@ -65,6 +85,7 @@ describe('三类构造器复用分析', () => {
     expect(preview.descriptionByKey.slot_1).toContain('estimated speed 321');
     expect(preview.descriptionByKey.slot_1).toContain('role: current request role marker');
     expect(preview.questions.lead_1.instructions).toContain('Vary your leads');
+    expect(preview.questions.lead_1.instructions).toMatch(/earns a lead slot only when its entry effect or matchup/);
     const plans = buildTurnPlans({dex, request, tracker, analysis});
     expect(plans[0].options.find(o => o.key === 'move_1_foe_a')?.label).toContain('estimated speed 321');
     const legacy = buildTurnPlans({dex, request, tracker});
@@ -269,15 +290,60 @@ describe('buildTurnPlans', () => {
     expect(label).toContain('hits both foes');
   });
 
-  it('mega 选项标注时机引导：形态升级即刻生效、唯一且阵亡前未声明即浪费', () => {
+  it('mega 选项展示属性变化与时机机制：新属性/特性当回合即生效、无法行动也照样 Mega；不声称阵亡浪费', () => {
     const plans = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()});
     const mega = plans[0].options.find(o => o.key === 'move_1_foe_a_mega');
     expect(mega?.label).toMatch(/MEGA EVOLVE Golisopod into Golisopod-Mega/);
     expect(mega?.label).toMatch(/ability Tough Claws/);
-    expect(mega?.label).toMatch(/Speed 40/);
+    // 变化属性逐项列出（Atk/Def/SpA/SpD），未变化的 Speed 40 不列出
+    expect(mega?.label).toMatch(/Atk 125→150/);
+    expect(mega?.label).toMatch(/Def 140→175/);
+    expect(mega?.label).toMatch(/SpA 60→70/);
+    expect(mega?.label).toMatch(/SpD 90→120/);
+    expect(mega?.label).not.toMatch(/Speed 40/);
     expect(mega?.label).toMatch(/only Mega/);
     expect(mega?.label).toMatch(/before any moves/);
-    expect(mega?.label).toMatch(/faints/);
+    expect(mega?.label).toMatch(/cannot act/);
+    expect(mega?.label).toMatch(/asleep/);
+    expect(mega?.label).toMatch(/paralyzed/);
+    expect(mega?.label).not.toMatch(/faints/i);
+    expect(mega?.label).not.toMatch(/wasted/i);
+  });
+
+  it('班基拉斯 Mega 展示四项核心提升，补上“选出却不 mega”的属性缺口', () => {
+    const data = mkDex();
+    data.species.tyranitarmega = {
+      name: 'Tyranitar-Mega', types: ['Rock', 'Dark'],
+      baseStats: {hp: 100, atk: 164, def: 150, spa: 95, spd: 120, spe: 71},
+      abilities: {0: 'Sand Stream'}, baseSpecies: 'Tyranitar', requiredItem: 'Tyranitarite',
+    };
+    const request = mkRequest();
+    request.side.pokemon[0].details = 'Tyranitar, L50, M';
+    request.side.pokemon[0].item = 'tyranitarite';
+    const mega = buildTurnPlans({dex: data, request, tracker: mkTracker()})[0].options.find(o => o.key === 'move_1_foe_a_mega');
+    expect(mega?.label).toContain('into Tyranitar-Mega (ability Sand Stream, Atk 134→164, Def 110→150, SpD 100→120, Speed 61→71)');
+  });
+
+  it('Coil 选项按在场对手的物攻倾向分层增强价值', () => {
+    const request = mkRequest();
+    request.active![0].moves[0] = {move: 'Coil', id: 'coil', pp: 20, maxpp: 20, target: 'self'};
+    request.side.pokemon[0].moves = ['coil', 'drillrun', 'leechlife', 'suckerpunch'];
+    const label = (tracker: BattleTracker) =>
+      buildTurnPlans({dex, request, tracker})[0].options.find(o => o.key === 'move_1')?.label ?? '';
+    // 默认无揭示：Victreebel 物攻向（atk 105 ≥ spa 100）、Charizard 特攻向 → 1 只物攻手
+    expect(label(mkTracker())).toContain('one active foe looks like a physical attacker');
+    // 双方都揭示物理招式 → 强提示
+    const both = mkTracker();
+    both.handleLine('|move|p2a: Victreebel|Dire Claw|p1a: Golisopod');
+    both.handleLine('|move|p2b: Charizard|Flare Blitz|p1a: Golisopod');
+    expect(label(both)).toContain('both active foes look like physical attackers');
+    // 双方都揭示特殊招式 → 只给基础效果说明
+    const special = mkTracker();
+    special.handleLine('|move|p2a: Victreebel|Sludge Bomb|p1a: Golisopod');
+    special.handleLine('|move|p2b: Charizard|Flamethrower|p1a: Golisopod');
+    const base = label(special);
+    expect(base).toContain("Coil raises the user's Attack, Defense and accuracy by one stage each");
+    expect(base).not.toContain('physical attacker');
   });
 
   it('目标 Mega 形态特性免疫招式属性时 criteria 给出警示；对手已用 Mega 后撤除', () => {

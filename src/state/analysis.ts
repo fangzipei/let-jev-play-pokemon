@@ -1,7 +1,7 @@
 import type {DexData} from '../dex/index.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import type {BattleState, PokemonState, SideState} from './tracker.js';
-import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, weatherAdjustedType} from './calc.js';
+import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, superEffectivePhrase, weatherAdjustedType} from './calc.js';
 import {toId} from './protocol.js';
 
 export interface OurSpeed {
@@ -204,10 +204,13 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (item === 'choicescarf') notes.push('Choice Scarf increases speed x1.5 with a move lock; opponent actual speeds remain unknown');
   if (moves.has('trick')) {
     notes.push(item === 'choicescarf'
-      ? 'Trick can pass this Choice Scarf to an opponent: the target is locked into one move for the speed boost and the held items swap'
+      ? "Trick can pass this Choice Scarf to an opponent: the target is locked into one move for the speed boost and the held items swap; handing the Scarf away also frees this Pokemon from its own single-move lock, so it can pick any move again; prefer a target that relies on options (slow, defensive or support pieces) since a fast attacker may gain more from the x1.5 Speed than it loses to the lock"
       : 'Trick swaps held items with the target; when a Choice item changes hands, its single-move lock goes with it');
   }
   if (moves.has('trickroom')) notes.push('Trick Room can support slower teammates by reversing speed order within each priority bracket; faster teammates may be disadvantaged');
+  if (moves.has('coil') && moves.has('hypnosis')) {
+    notes.push('Coil and Hypnosis form a tempo plan: the accuracy boost from Coil raises Hypnosis to 80%, and each landed Hypnosis buys free turns while this Pokemon keeps stacking or healing');
+  }
   if (moves.has('heatwave')) notes.push('Heat Wave targets both foes with spread reduction when hitting multiple targets');
   if (ability === 'flashfire') notes.push('Flash Fire can absorb Fire attacks unless the ability is bypassed or suppressed');
   if (ability === 'sandrush') notes.push('Sand Rush doubles speed only in effective sandstorm; do not assume weather or a favorable speed matchup');
@@ -220,8 +223,12 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (ability === 'intimidate') notes.push(`Intimidate ${canMega ? '(before Mega) ' : ''}can lower opposing Attack on entry, subject to immunities and ability interactions`);
   if (moves.has('hypervoice')) {
     const futureAerilate = canMega && Object.values(mega?.abilities ?? {}).some(a => toId(a) === 'aerilate');
-    if (ability === 'aerilate') notes.push('The current Aerilate can turn Hyper Voice into Flying spread damage unless suppressed or bypassed');
-    else notes.push(futureAerilate ? `With ${mega!.requiredItem}, post-Mega Aerilate can turn Hyper Voice into Flying spread damage; this is conditional, not the current ability` : 'Hyper Voice provides spread damage using the current form and ability');
+    const flyingCoverage = superEffectivePhrase(input.dex, 'Flying');
+    const coverageClause = flyingCoverage ? `; Flying is super effective against ${flyingCoverage} types` : '';
+    if (ability === 'aerilate') notes.push(`The current Aerilate can turn Hyper Voice into Flying spread damage unless suppressed or bypassed${coverageClause}`);
+    else notes.push(futureAerilate
+      ? `With ${mega!.requiredItem}, post-Mega Aerilate can turn Hyper Voice into Flying spread damage${coverageClause}; this is conditional, not the current ability`
+      : 'Hyper Voice provides spread damage using the current form and ability');
   }
   if (ability === 'levitate') notes.push('Levitate can grant Ground immunity unless grounded, bypassed or suppressed; type-only matchups do not include this');
   if (moves.has('voltswitch')) notes.push('Volt Switch can pivot after a successful hit; Ground immunity or blocked switching can prevent that plan');
@@ -234,7 +241,8 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (ability === 'psychicsurge') {
     notes.push('Psychic Surge sets Psychic Terrain on entry: Psychic moves are boosted for grounded Pokemon and priority moves are blocked against grounded targets');
     const hasExpandingForce = moves.has('expandingforce') || hasTeammate(p => (p.moves ?? []).some(m => toId(m) === 'expandingforce'));
-    notes.push("The terrain is contested: it expires and a foe can replace it with another terrain; re-entering with this Pokemon re-sets Psychic Terrain and can overwrite a foe's terrain" + (hasExpandingForce ? ", restoring the Expanding Force spread bonus" : ''));
+    notes.push("The terrain is contested: it expires and a foe can replace it with another terrain; re-entering with this Pokemon re-sets Psychic Terrain and can overwrite a foe's terrain" + (hasExpandingForce ? ", restoring the Expanding Force spread bonus" : '') + ", and a pivot cycle (switch out and back in) is a reliable way to win the terrain back when a foe covers it or it expires");
+    notes.push("This Pokemon is the team's terrain controller rather than a main damage dealer: treat its attacks as opportunistic and keep it healthy enough for a re-entry instead of trading it away for damage");
   }
   if (moves.has('expandingforce')) {
     const surgeNearby = ability === 'psychicsurge'
@@ -266,7 +274,7 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (hasTeammate(p => (p.moves ?? []).some(m => toId(m) === 'helpinghand'))) notes.push("A teammate has Helping Hand: this Pokemon's next damage can be boosted x1.5 that turn, at the cost of the teammate's action");
   if (moves.has('coaching')) notes.push("This Pokemon has Coaching: it can raise a teammate's Attack and Defense by one stage each at the cost of its own action");
   else if (hasTeammate(p => (p.moves ?? []).some(m => toId(m) === 'coaching'))) notes.push("A teammate has Coaching: it raises this Pokemon's Attack and Defense by one stage each, arriving after the teammate spends its action");
-  if (moves.has('tailwind')) notes.push("Tailwind doubles this side's speed for four turns; it changes the speed order within each priority bracket and its effect ends on a known turn");
+  if (moves.has('tailwind')) notes.push("Tailwind doubles this side's speed for four turns; it changes the speed order within each priority bracket and its effect ends on a known turn, so using it is usually worth trying rather than saving");
   if (moves.has('partingshot')) notes.push('Parting Shot lowers the target Attack and Special Attack by one stage each and then switches the user out; it fails against substitutes and abilities that block stat drops');
   if (moves.has('uturn') || moves.has('flipturn')) notes.push('This Pokemon can pivot out with a damaging move after the hit resolves; pivoting forfeits its remaining presence this turn while bringing in a teammate');
   if (moves.has('knockoff')) notes.push("Knock Off removes the target's held item while dealing damage; it reveals the item, and item-dependent foes lose their boosts, but Mega Stones cannot be removed");

@@ -123,7 +123,7 @@ export function buildPreviewQuestions(input: {
     ? " Check each slot's likely-form coverage: when it lists a probable Mega form, favor that attacker and vary your lead pair instead of repeating a default combination."
     : '';
   const intro = INTRO + (input.analysis && input.analysis.level >= 2
-    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game.' + coverageAdvice + megaAdvice + leadIntelText + spreadAdvice : '');
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game. A support or terrain setter earns a lead slot only when its entry effect or matchup answers the opponent\'s likely opening, not out of habit.' + coverageAdvice + megaAdvice + leadIntelText + spreadAdvice : '');
   const instructions: Record<string, string> = {
     lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
     lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,

@@ -1,6 +1,6 @@
 import {canMegaWith, megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
-import {effectiveness, entryWeatherOf, estimateDamagePercent, hpScaledBasePower, knownEffectiveness, neutralSpeedTier, weatherAdjustedType} from './calc.js';
-import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OurSpeed, type TeamThreat} from './analysis.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, estimatedMove, hpScaledBasePower, knownEffectiveness, megaSkinAbility, neutralSpeedTier, weatherAdjustedType} from './calc.js';
+import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OppSpeedEstimate, type OurSpeed, type TeamThreat} from './analysis.js';
 import type {OpponentNoteSet} from './opponent-notes.js';
 import {buildBattleContext, seenInBattle} from './battle-context.js';
 import {toId} from './protocol.js';
@@ -186,6 +186,12 @@ export interface MoveOptionInput {
   attackerMainAttack?: {stat: 'spa' | 'atk'; stage: number};
   /** 我方未倒下成员（含替补）的速度估计与在场标记：供 Trick Room 收益注解统计慢速成员 */
   ourLiveSpeeds?: Array<{species: string; speed: number; active: boolean}>;
+  /** 在场对手 ident 列表：无目标招式（自身招式）的速度线结论只覆盖这些对手，避免列入未上场替补；缺省时退回全部已见对手 */
+  activeFoes?: string[];
+  /** 在场对手中物攻向的数量（Coil 等防御强化选项按此分层提示价值） */
+  physicalFoes?: number;
+  /** 使用者的完整招式 id 列表：Coil 的命中收益、催眠术的强化配合等组合注解按此判定 */
+  attackerMoves?: string[];
 }
 
 /** Last Respects 真实威力：50 基础 + 每名已阵亡队友 50（PS basePowerCallback） */
@@ -244,15 +250,45 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
       const outlook = trickRoomOutlook(input);
       if (outlook) notes.push(outlook);
       if (input.speedControl?.opponent_tailwind) {
-        notes.push("the foe's Tailwind is active: Trick Room inverts the acting order within each priority bracket, so their doubled Speed would work against them while it lasts; your own faster members would also move later under it");
+        notes.push(`the foe's Tailwind is active (${turnsPhrase(input.speedControl.opponent_tailwind.turns_left)}): Trick Room inverts the acting order within each priority bracket, so their doubled Speed would work against them while it lasts; your own faster members would also move later under it`);
       }
     }
   }
   if (moveId === 'tailwind' && input.speedControl) {
     const tw = input.speedControl.our_tailwind;
-    notes.push(tw
-      ? `Tailwind is already active on your side with ${turnsPhrase(tw.turns_left)}: using it again will fail, it does not extend or restart the current Tailwind`
-      : 'Tailwind lasts 4 turns; a side can only have one Tailwind, so using it while one is already active fails');
+    if (tw) {
+      notes.push(`Tailwind is already active on your side with ${turnsPhrase(tw.turns_left)}: using it again will fail, it does not extend or restart the current Tailwind`);
+    } else {
+      notes.push("Tailwind lasts 4 turns and doubles your side's Speed, which can flip the move order within a priority bracket; a side can only have one Tailwind, so using it while one is already active fails");
+      const outlook = tailwindOutlook(input);
+      if (outlook) notes.push(outlook);
+    }
+  }
+  if (moveId === 'coil') {
+    const setup = "Coil raises the user's Attack, Defense and accuracy by one stage each; the Defense stage cuts incoming physical damage by about a third, and a second layer about halves it";
+    const physical = input.physicalFoes ?? 0;
+    if (physical >= 2) notes.push(`${setup} — both active foes look like physical attackers, so this immediately blunts their main damage`);
+    else if (physical === 1) notes.push(`${setup} — one active foe looks like a physical attacker, so this blunts its damage right away`);
+    else notes.push(setup);
+    const known = new Set((input.attackerMoves ?? []).map(m => toId(m)));
+    const accuracyTargets = [
+      known.has('hypnosis') ? "raises Hypnosis's hit rate from 60% to 80%" : '',
+      known.has('muddywater') ? 'brings Muddy Water to perfect accuracy (90% → 100%)' : '',
+    ].filter(Boolean);
+    if (accuracyTargets.length) notes.push(`the accuracy stage also ${accuracyTargets.join(' and ')} while the boosts last; the boosts persist until this Pokemon switches out, so later turns benefit from this choice too`);
+  }
+  if (moveId === 'hypnosis') {
+    const known = new Set((input.attackerMoves ?? []).map(m => toId(m)));
+    notes.push('Hypnosis puts the target to sleep on a hit (60% accuracy; the sleeper cannot act for 1-3 turns), but it fails against a target that already has a status condition');
+    notes.push('a landed Hypnosis steals whole turns from the opponent, so it is worth attempting on a high-threat target when a miss is affordable'
+      + (known.has('coil') ? '; pair it with Coil first: the accuracy stage raises it to 80%' : ''));
+  }
+  if (moveId === 'trick') {
+    const trickChoice = CHOICE_ITEMS[toId(input.attackerItem ?? '')];
+    if (trickChoice) {
+      const speedNote = toId(input.attackerItem ?? '') === 'choicescarf' ? ' with the x1.5 Speed' : '';
+      notes.push(`Trick swaps held items with the target: it inherits this Pokemon's ${trickChoice}${speedNote} and, once it uses a move while holding it, is locked into repeating that move; this Pokemon takes the target's item and, no longer Choice-locked, can select any move again — prefer a target that relies on options (slow, defensive or support pieces), since a fast attacker may gain more from the speed than the lock costs it`);
+    }
   }
   const bp = lastRespectsPower(input);
   if (bp !== undefined) {
@@ -269,28 +305,26 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
       const foes = (targets.length
         ? input.analysis?.oppSpeedEstimates.filter(s => targets.some(t => t.ident ? s.ident === t.ident : s.species === t.species))
         : input.analysis?.oppSpeedEstimates) ?? [];
-      const trickRoom = input.speedControl?.trick_room != null;
-      for (const foe of foes) {
-        if (foe.baseSpeed == null) continue;
-        const neutral = neutralSpeedTier(foe.baseSpeed);
-        if (trickRoom) {
-          notes.push(ownSpeed < neutral
-            ? `under the active Trick Room your estimated speed ${ownSpeed} acts before ${foe.species} (neutral full-investment ${neutral})`
-            : `under the active Trick Room the slower side moves first: ${foe.species} (neutral full-investment ${neutral}) would likely act before your estimated speed ${ownSpeed}`);
-          continue;
-        }
-        if (ownSpeed >= neutral) continue;
-        const rough = input.analysis?.threats.find(t => t.slot === input.attackerSlot)?.incoming
-          .find(i => i.foeIdent === foe.ident)?.roughPercent ?? null;
-        const prefix = `${foe.species} (neutral full-investment ${neutral}) outruns your estimated speed ${ownSpeed}`;
-        if (rough === null) {
-          notes.push(`${prefix}: if it damages you first, this move resolves weaker`);
-        } else if (rough >= attackerHp) {
-          notes.push(`${prefix}: a first hit for ≈${rough}% (revealed moves only) would KO you before this resolves`);
-        } else {
-          const hpAfter = attackerHp - rough;
-          const bpAfter = hpScaledBasePower(input.dex, moveId, hpAfter) ?? scaledPower;
-          notes.push(`${prefix}: if it hits you first for ≈${rough}% (revealed moves only), this resolves at ≈${hpAfter}% HP and ≈${bpAfter} BP`);
+      // 控速（空间/任一方顺风）激活时出手顺序由 speedOrderNotes 统一给出结论，这里只在无控速时
+      // 保留“被先手会削威力”的专属警告
+      const anyControl = !!(input.speedControl?.trick_room || input.speedControl?.our_tailwind || input.speedControl?.opponent_tailwind);
+      if (!anyControl) {
+        for (const foe of foes) {
+          if (foe.baseSpeed == null) continue;
+          const neutral = neutralSpeedTier(foe.baseSpeed);
+          if (ownSpeed >= neutral) continue;
+          const rough = input.analysis?.threats.find(t => t.slot === input.attackerSlot)?.incoming
+            .find(i => i.foeIdent === foe.ident)?.roughPercent ?? null;
+          const prefix = `${foe.species} (neutral full-investment ${neutral}) outruns your estimated speed ${ownSpeed}`;
+          if (rough === null) {
+            notes.push(`${prefix}: if it damages you first, this move resolves weaker`);
+          } else if (rough >= attackerHp) {
+            notes.push(`${prefix}: a first hit for ≈${rough}% (revealed moves only) would KO you before this resolves`);
+          } else {
+            const hpAfter = attackerHp - rough;
+            const bpAfter = hpScaledBasePower(input.dex, moveId, hpAfter) ?? scaledPower;
+            notes.push(`${prefix}: if it hits you first for ≈${rough}% (revealed moves only), this resolves at ≈${hpAfter}% HP and ≈${bpAfter} BP`);
+          }
         }
       }
     }
@@ -319,6 +353,71 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
 }
 
 /**
+ * 速度注解覆盖的对手范围：有明确目标时只算被点名的对手；无目标招式（自身招式）按在场对手
+ * （activeFoes）限定，避免列入未上场替补；两者都缺省时回退全部已见对手。
+ */
+function speedScopeFoes(input: MoveOptionInput, analysis: AnalysisContext): OppSpeedEstimate[] {
+  const targets = input.targets?.length ? input.targets : input.target ? [input.target] : [];
+  if (targets.length) return analysis.oppSpeedEstimates.filter(s => targets.some(t => t.ident ? s.ident === t.ident : s.species === t.species));
+  if (input.activeFoes) return analysis.oppSpeedEstimates.filter(s => s.ident !== undefined && input.activeFoes!.includes(s.ident));
+  return analysis.oppSpeedEstimates;
+}
+
+/**
+ * 控速状态下的出手顺序结论：Trick Room 或任一方 Tailwind 激活时，对每个相关对手直接算好谁先动
+ * （我方取 request 现值，已含自身全部修正；对手用中性满投资档位，其顺风再翻倍），并标注状态的
+ * 剩余回合。数据不足（无 analysis、速度未知、无对手档位）时不生成，不猜测。
+ */
+function speedOrderNotes(input: MoveOptionInput): string[] {
+  const control = input.speedControl;
+  if (!control || (!control.trick_room && !control.our_tailwind && !control.opponent_tailwind)) return [];
+  const analysis = input.analysis;
+  if (!analysis || input.attackerSlot === undefined) return [];
+  const ownSpeed = analysis.ourSpeeds.find(s => s.slot === input.attackerSlot)?.speed ?? null;
+  if (ownSpeed === null) return [];
+  const foes = speedScopeFoes(input, analysis);
+  const conditions: string[] = [];
+  if (control.trick_room) conditions.push(`Trick Room is active with ${turnsPhrase(control.trick_room.turns_left)} (slower Pokemon move first)`);
+  if (control.opponent_tailwind) conditions.push(`the foe's Tailwind is active with ${turnsPhrase(control.opponent_tailwind.turns_left)} (doubling their Speed)`);
+  if (control.our_tailwind) conditions.push(`your Tailwind is active with ${turnsPhrase(control.our_tailwind.turns_left)} (doubling your Speed)`);
+  const condition = conditions.join('; ');
+  const notes: string[] = [];
+  for (const foe of foes) {
+    if (foe.baseSpeed == null) continue;
+    const neutral = neutralSpeedTier(foe.baseSpeed);
+    const foeSpeed = control.opponent_tailwind ? neutral * 2 : neutral;
+    const foeDesc = `${foe.species} (neutral full-investment ${neutral}${control.opponent_tailwind ? `, doubled to ${neutral * 2}` : ''})`;
+    const actsFirst = control.trick_room ? ownSpeed < foeSpeed : ownSpeed >= foeSpeed;
+    notes.push(actsFirst
+      ? `${condition}: your estimated speed ${ownSpeed} would act before ${foeDesc}`
+      : `${condition}: ${foeDesc} would likely act before your estimated speed ${ownSpeed}`);
+  }
+  return notes;
+}
+
+/**
+ * 开顺风的前瞻结论：按“当前估速翻倍后”与相关对手的中性满速档位比较，直接说明能先手谁或仍追不上谁。
+ * 数据不足、空间激活或对手顺风已激活（对手速度同样翻倍）时不生成，不猜测。
+ */
+function tailwindOutlook(input: MoveOptionInput): string | null {
+  const analysis = input.analysis;
+  if (!analysis || input.attackerSlot === undefined) return null;
+  if (input.speedControl?.trick_room || input.speedControl?.opponent_tailwind) return null;
+  const ownSpeed = analysis.ourSpeeds.find(s => s.slot === input.attackerSlot)?.speed ?? null;
+  if (ownSpeed === null) return null;
+  const foes = speedScopeFoes(input, analysis).flatMap(foe =>
+    foe.baseSpeed == null ? [] : [{species: foe.species, tier: neutralSpeedTier(foe.baseSpeed)}]);
+  if (!foes.length) return null;
+  const doubled = ownSpeed * 2;
+  const desc = (f: {species: string; tier: number}) => `${f.species} (neutral full-investment ${f.tier})`;
+  const before = foes.filter(f => doubled >= f.tier);
+  if (before.length) {
+    return `setting Tailwind now doubles your estimated speed ${ownSpeed} to ${doubled}, which would act before ${before.map(desc).join(', ')}`;
+  }
+  return `setting Tailwind now doubles your estimated speed ${ownSpeed} to ${doubled}, still below ${foes.map(desc).join(', ')}`;
+}
+
+/**
  * Trick Room 收益事实：我方未倒下成员中速度低于在场对手中性满速档位的（他们在空间下会先出手）。
  * 数据不足（无 analysis、无在场对手或速度未知）时不生成，不猜测。
  */
@@ -340,14 +439,15 @@ function trickRoomOutlook(input: MoveOptionInput): string | null {
     ? `foe ${foes[0].species}'s neutral full-investment tier (${foes[0].tier})`
     : `both foes' neutral full-investment tiers (${foes.map(f => `${f.species} ${f.tier}`).join(', ')})`;
   const subject = slower.length === 1 ? 'it' : 'they';
-  return `under Trick Room your slower Pokemon act first: ${members} ${slower.length === 1 ? 'is' : 'are'} below ${benchmark}, so ${subject} would move before ${foes.length === 1 ? 'the remaining foe' : 'the foes'} while it lasts`;
+  return `under Trick Room your slower Pokemon act first: ${members} ${slower.length === 1 ? 'is' : 'are'} below ${benchmark}, so ${subject} would move before ${foes.length === 1 ? 'the remaining foe' : 'the foes'} for its 5 turns`;
 }
 
 export function describeMoveOption(input: MoveOptionInput): string {
   const move = input.dex.moves[toId(input.moveId)];
-  // 气象球随当前天气改属性并翻倍威力（晴 → Fire/100BP），头部与估算保持一致
-  const moveType = move ? weatherAdjustedType(input.moveId, move.type, input.weather) : undefined;
-  const shownPower = move && moveType !== move.type ? move.basePower * 2 : move?.basePower;
+  // 气象球随当前天气改属性并翻倍威力（晴 → Fire/100BP）；-ate 皮肤转属性并加 1.2x 威力，头部与估算保持一致
+  const est = move ? estimatedMove(input.moveId, move.type, input.weather, input.attackerAbility) : undefined;
+  const moveType = est?.type;
+  const shownPower = move && est ? Math.round(move.basePower * est.powerMultiplier) : undefined;
   const head = `${input.moveName} [${moveType ?? '?'}/${move?.category ?? '?'}/${shownPower ?? '?'}BP/PP ${input.pp}/${input.maxpp}${
     move && move.priority ? `/priority ${move.priority}` : ''
   }]`;
@@ -391,16 +491,29 @@ export function describeMoveOption(input: MoveOptionInput): string {
     extras.push(`(the attacker's ${label} is at ${main.stage} (about ${Math.round(200 / (2 - main.stage))}% of its usual output); this estimate does not include stat stages, so actual damage is lower)`);
   }
   if (move && move.category !== 'Status') extras.push(`(${DAMAGE_CAVEAT})`);
+  const speedOrder = speedOrderNotes(input);
   if (input.analysis) {
     extras.push(speedText(input.analysis.ourSpeeds.find(s => s.slot === input.attackerSlot)));
-    const foes = targets.length
-      ? input.analysis.oppSpeedEstimates.filter(s => targets.some(t => t.ident ? s.ident === t.ident : s.species === t.species))
-      : input.analysis.oppSpeedEstimates;
-    for (const foe of foes) extras.push(`${foe.species} base speed ${foe.baseSpeed ?? 'unknown'}, actual speed unknown; move order unknown`);
+    for (const foe of speedScopeFoes(input, input.analysis)) {
+      extras.push(`${foe.species} base speed ${foe.baseSpeed ?? 'unknown'}, actual speed unknown; ${
+        speedOrder.length ? 'move order is resolved below under the active speed control' : 'move order unknown'}`);
+    }
     if (move?.priority) extras.push('priority bracket is checked before speed');
   }
-  return [head, ...extras, ...moveTacticNotes(input)].join(' ');
+  return [head, ...extras, ...moveTacticNotes(input), ...speedOrder].join(' ');
 }
+
+/** 换入即触发的天气/场地特性：换入即重设，是抢回天气/场地的轮换手段 */
+const ENTRY_SET_EFFECTS: Record<string, string> = {
+  psychicsurge: 'on entry this Pokemon re-sets Psychic Terrain, overwriting any current terrain — a re-entry is a reliable way to win the terrain back',
+  grassysurge: 'on entry this Pokemon re-sets Grassy Terrain, overwriting any current terrain — a re-entry is a reliable way to win the terrain back',
+  mistysurge: 'on entry this Pokemon re-sets Misty Terrain, overwriting any current terrain — a re-entry is a reliable way to win the terrain back',
+  electricsurge: 'on entry this Pokemon re-sets Electric Terrain, overwriting any current terrain — a re-entry is a reliable way to win the terrain back',
+  drought: 'on entry this Pokemon re-sets sun, overwriting the current weather',
+  drizzle: 'on entry this Pokemon re-sets rain, overwriting the current weather',
+  sandstream: 'on entry this Pokemon re-sets sandstorm, overwriting the current weather',
+  snowwarning: 'on entry this Pokemon re-sets snow, overwriting the current weather',
+};
 
 export function describeSwitchOption(input: {
   dex: DexData;
@@ -421,6 +534,7 @@ export function describeSwitchOption(input: {
     input.pokemon.item ? `, item ${input.pokemon.item}` : ''
   }${input.pokemon.ability ? `, ability ${input.pokemon.ability}` : ''}, ${input.forced ? 'forced replacement' : 'costs your action this turn'}]`;
   const outgoingNotes: string[] = [];
+  const entryEffect = ENTRY_SET_EFFECTS[toId(input.pokemon.ability ?? input.pokemon.baseAbility ?? '')];
   if (input.outgoing) {
     const o = input.outgoing;
     if (o.yawning) outgoingNotes.push(`switching this slot out removes Yawn from ${o.species} before it falls asleep`);
@@ -443,7 +557,7 @@ export function describeSwitchOption(input: {
   const risks = incoming.map(i => `incoming ${i.roughPercent === null ? 'unknown' : `≈${i.roughPercent}%`} from ${i.foeSpecies} (revealed moves only${i.unknownMoves.length ? `; unknown: ${i.unknownMoves.join(', ')}` : ''})`);
   // 手动换人必须提醒代价：换入者本回合不能行动，会先吃打向该槽位的攻击（可能少血甚至被击倒）
   const manualCost = input.forced ? [] : ['the switch-in cannot act this turn and will take any attacks aimed at this slot'];
-  return [head, ...outgoingNotes, ...manualCost, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
+  return [head, ...(entryEffect ? [entryEffect] : []), ...outgoingNotes, ...manualCost, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot)].filter(Boolean).join('; ');
 }
 
@@ -473,6 +587,8 @@ function describeLeadLine(input: {
   analysis: AnalysisContext;
   teamSlot?: number;
   foeLeads: PreviewLeadIntel[];
+  /** post-Mega 皮肤特性（-ate）：估算按转换后属性，命中行标注 post-Mega */
+  skinAbility?: string | null;
 }): string {
   const {dex, analysis} = input;
   const own = analysis.ourSpeeds.find(s => input.teamSlot === undefined ? s.ident === input.pokemon.ident : s.slot === input.teamSlot);
@@ -489,21 +605,25 @@ function describeLeadLine(input: {
   }
   const types = speciesTypes(dex, speciesOf(input.pokemon));
   const entryWeather = entryWeatherOf(input.pokemon);
+  const estimateAbility = input.skinAbility ?? input.pokemon.ability ?? input.pokemon.baseAbility;
   const offense: string[] = [];
   const defense: string[] = [];
   // 关系判定覆盖全部预期首发；攻防展示仍各限 2 条，经验句不因展示截断而丢失
   const related = new Set<string>();
   for (const lead of input.foeLeads) {
-    let hit: {name: string; mult: number} | null = null;
+    let hit: {name: string; mult: number; postMega?: boolean} | null = null;
     for (const id of input.pokemon.moves ?? []) {
       const mv = dex.moves[toId(id)];
       if (!mv || !mv.basePower) continue;
-      const mult = knownEffectiveness(dex, weatherAdjustedType(id, mv.type, entryWeather), lead.types);
-      if (mult !== null && mult > 1 && (!hit || mult > hit.mult)) hit = {name: mv.name, mult};
+      const est = estimatedMove(id, mv.type, entryWeather, estimateAbility);
+      const mult = knownEffectiveness(dex, est.type, lead.types);
+      if (mult !== null && mult > 1 && (!hit || mult > hit.mult)) {
+        hit = {name: mv.name, mult, postMega: est.type !== weatherAdjustedType(id, mv.type, entryWeather)};
+      }
     }
     if (hit) {
       related.add(lead.species);
-      if (offense.length < 2) offense.push(`hits ${lead.species} ${hit.mult}x (${hit.name})`);
+      if (offense.length < 2) offense.push(`hits ${lead.species} ${hit.mult}x (${hit.name}${hit.postMega ? ' post-Mega' : ''})`);
     }
     let threat: {type: string; mult: number} | null = null;
     for (const type of lead.types) {
@@ -541,8 +661,12 @@ export function describePreviewCandidate(input: {
   const moveNames = (input.pokemon.moves ?? []).map(id => input.dex.moves[toId(id)]?.name ?? id);
   // 自身入场造天气（如 Drought 造晴）时，气象球按该天气属性参与预览对位
   const entryWeather = entryWeatherOf(input.pokemon);
-  const effectiveType = (id: string, mv: {type: string}) => weatherAdjustedType(id, mv.type, entryWeather);
-  const typeLabel = (mv: {type: string}, type: string) => type === mv.type ? mv.type : `${type} in ${entryWeather}`;
+  // 皮肤型 Mega（如 Salamencite→Aerilate）：估算按 post-Mega 属性结算，文字与标签显式标注 post-Mega
+  const megaSkin = input.megaCapable ? megaSkinAbility(input.dex, species, input.pokemon.item) : null;
+  const estimateAbility = megaSkin ?? input.pokemon.ability ?? input.pokemon.baseAbility;
+  const effectiveType = (id: string, mv: {type: string}) => estimatedMove(id, mv.type, entryWeather, estimateAbility).type;
+  const typeLabel = (id: string, mv: {type: string}, type: string) => type === mv.type ? mv.type
+    : (type !== weatherAdjustedType(id, mv.type, entryWeather) ? `${type} post-Mega` : `${type} in ${entryWeather}`);
   let bestName = '';
   let bestId = '';
   let bestCount = 0;
@@ -550,14 +674,10 @@ export function describePreviewCandidate(input: {
     const mv = input.dex.moves[toId(id)];
     if (!mv || !mv.basePower) continue;
     let count = 0;
-    if (input.analysis) {
-      const threat = input.analysis.threats.find(t => input.teamSlot === undefined ? t.ident === input.pokemon.ident : t.slot === input.teamSlot);
-      count = threat?.outgoing.filter(m => toId(m.move) === toId(id) && m.multiplier !== null && m.multiplier > 1).length ?? 0;
-    } else {
-      for (const foe of input.opponentPreviewSpecies) {
-        const mult = knownEffectiveness(input.dex, effectiveType(id, mv), speciesTypes(input.dex, foe));
-        if (mult !== null && mult > 1) count++;
-      }
+    // 与 effectiveType 同源：皮肤型 Mega 的超效计数也按 post-Mega 属性
+    for (const foe of input.analysis?.previewFoes.map(f => f.species) ?? input.opponentPreviewSpecies) {
+      const mult = knownEffectiveness(input.dex, effectiveType(id, mv), speciesTypes(input.dex, foe));
+      if (mult !== null && mult > 1) count++;
     }
     if (count > bestCount) {
       bestCount = count;
@@ -565,13 +685,12 @@ export function describePreviewCandidate(input: {
       bestId = id;
     }
   }
-  const attackerAbility = input.pokemon.ability ?? input.pokemon.baseAbility;
-  // best 行与 coverage 行同用当前形态的伤害估算口径（STAB、攻击值、克制、天气）
+  // best 行与 coverage 行同源：STAB、攻击值、克制、天气；皮肤型 Mega 的属性/本系按 post-Mega，stats 仍当前形态
   const damageOf = (moveId: string, defenderSpecies: string): number | null => {
     const mv = input.dex.moves[toId(moveId)];
     return estimateDamagePercent({
       dex: input.dex, moveId, attackerTypes: types, attackerStats: input.pokemon.stats,
-      attackerAbility, defenderSpecies, weather: entryWeather,
+      attackerAbility: estimateAbility, defenderSpecies, weather: entryWeather,
       isSpread: !!mv && (mv.target === 'allAdjacentFoes' || mv.target === 'allAdjacent'),
     });
   };
@@ -596,7 +715,7 @@ export function describePreviewCandidate(input: {
       if (!mv || !mv.basePower) continue;
       const type = effectiveType(id, mv);
       const mult = knownEffectiveness(input.dex, type, foe.types);
-      if (mult !== null && mult > 1) hits.push({moveId: id, name: mv.name, label: typeLabel(mv, type), multiplier: mult});
+      if (mult !== null && mult > 1) hits.push({moveId: id, name: mv.name, label: typeLabel(id, mv, type), multiplier: mult});
     }
     if (!hits.length) continue;
     const bestMult = Math.max(...hits.map(h => h.multiplier));
@@ -606,15 +725,18 @@ export function describePreviewCandidate(input: {
     const pct = damageOf(best[0].moveId, input.dex.species[toId(foe.name)] ? foe.name : foe.species);
     coverage.push(`${desc} ${best.length > 1 ? 'hit' : 'hits'} likely ${foe.name} [${foe.types.join('/')}] ${bestMult}x${pct !== null ? ` ≈${pct}%` : ''} (${foe.percent.toFixed(1)}% Mega-stone prior, rough estimate)`);
   }
+  const bestMove = bestId ? input.dex.moves[bestId] : undefined;
+  const bestSkinType = megaSkin && bestMove && toId(bestMove.type) === 'normal'
+    ? estimatedMove(bestId, bestMove.type, entryWeather, megaSkin).type : null;
   const parts = [
     `${species} [${types.join('/') || '?'}]`,
     `moves: ${moveNames.join(', ') || '?'}`,
     input.megaCapable ? "can Mega Evolve (uses the team's only Mega slot)" : '',
-    bestCount > 0 ? `best: ${bestName} hits ${bestCount}/${input.analysis?.previewFoes.length ?? input.opponentPreviewSpecies.length} foes super effectively${topText}` : '',
+    bestCount > 0 ? `best: ${bestName}${bestSkinType ? ` (${bestSkinType} post-Mega)` : ''} hits ${bestCount}/${input.analysis?.previewFoes.length ?? input.opponentPreviewSpecies.length} foes super effectively${topText}` : '',
     ...(coverage.length ? [`likely-form coverage: ${coverage.slice(0, 2).join('; ')}`] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot),
     ...(input.leadIntel && input.analysis && input.analysis.level >= 2
-      ? [describeLeadLine({dex: input.dex, pokemon: input.pokemon, analysis: input.analysis, teamSlot: input.teamSlot, foeLeads: input.leadIntel.foeLeads})]
+      ? [describeLeadLine({dex: input.dex, pokemon: input.pokemon, analysis: input.analysis, teamSlot: input.teamSlot, foeLeads: input.leadIntel.foeLeads, skinAbility: megaSkin})]
       : []),
   ];
   return parts.filter(Boolean).join('; ');

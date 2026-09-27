@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {effectiveness, entryWeatherOf, estimateDamagePercent, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, superEffectivePhrase, superEffectiveTypes, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -118,6 +118,39 @@ describe('estimateDamagePercent', () => {
   });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();
+  });
+});
+
+describe('superEffectiveTypes 与短语', () => {
+  it('返回该属性克制（≥2x）的防守属性列表与可读短语；缺数据时不猜', () => {
+    const dex = mkDex();
+    expect(superEffectiveTypes(dex, 'flying')).toEqual(['Grass', 'Fighting', 'Bug']);
+    expect(superEffectivePhrase(dex, 'flying')).toBe('Grass, Fighting and Bug');
+    expect(superEffectiveTypes(dex, 'missingno')).toEqual([]);
+    expect(superEffectivePhrase(dex, 'missingno')).toBeNull();
+    dex.typechart.flying = {};
+    expect(superEffectiveTypes(dex, 'flying')).toEqual([]);
+  });
+});
+
+describe('-ate 皮肤特性（Aerilate/Pixilate）把一般系招式按转换后属性结算', () => {
+  const dex = mkDex();
+  const base = {dex, moveId: 'hypervoice', attackerTypes: ['Dragon', 'Flying'], attackerStats: {spa: 100}, defenderSpecies: 'Rillaboom'};
+  it('Aerilate：飞行 2x、威力 1.2x、飞行本系 1.5x 全部生效；非一般系招式不受影响', () => {
+    const plain = estimateDamagePercent({...base, attackerAbility: 'intimidate'})!;
+    const aerilate = estimateDamagePercent({...base, attackerAbility: 'aerilate'})!;
+    expect(plain).toBe(27);
+    expect(aerilate).toBe(98);
+    const offType = {...base, moveId: 'dracometeor'};
+    expect(estimateDamagePercent({...offType, attackerAbility: 'aerilate'})).toBe(estimateDamagePercent(offType));
+  });
+  it('Pixilate 转妖精系而非飞行系：2x 只对龙系成立', () => {
+    const fairy = estimateDamagePercent({...base, attackerTypes: ['Psychic', 'Fairy'], attackerAbility: 'pixilate', defenderSpecies: 'Salamence'})!;
+    expect(fairy).toBe(90);
+  });
+  it('气象球在有天气时按天气属性结算，不叠加皮肤转换', () => {
+    const wb = {dex, moveId: 'weatherball', attackerTypes: ['Dragon', 'Flying'], attackerStats: {spa: 100}, defenderSpecies: 'Rillaboom', weather: 'SunnyDay'};
+    expect(estimateDamagePercent({...wb, attackerAbility: 'aerilate'})).toBe(estimateDamagePercent({...wb, attackerAbility: 'intimidate'}));
   });
 });
 

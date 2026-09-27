@@ -265,6 +265,39 @@ describe('buildAnalysisContext 条件化角色', () => {
     expect(notes).toMatch(/overwrite a foe's terrain/i);
     expect(notes).toMatch(/Expanding Force spread bonus/i);
   });
+  it('场地控制者定位：Indeedee 不承担核心输出，轮换抢回场地是明确手段', () => {
+    const input = setup();
+    input.dex.species.indeedee = {name: 'Indeedee', types: ['Psychic', 'Normal'], baseStats: {hp: 60, atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, abilities: {0: 'Psychic Surge'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '167/167', active: false,
+        stats: {spe: 115}, moves: ['expandingforce', 'protect', 'mysticalfire', 'trick'], item: 'choicescarf', ability: 'psychicsurge'},
+    );
+    const notes = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(notes).toMatch(/terrain controller/);
+    expect(notes).toMatch(/switch out and back in/);
+  });
+  it('戏法围巾注解：传走围巾锁对手并解放自己，优先选项依赖型目标', () => {
+    const input = setup();
+    input.dex.species.indeedee = {name: 'Indeedee', types: ['Psychic', 'Normal'], baseStats: {hp: 60, atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, abilities: {0: 'Psychic Surge'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '167/167', active: false,
+        stats: {spe: 115}, moves: ['expandingforce', 'protect', 'mysticalfire', 'trick'], item: 'choicescarf', ability: 'psychicsurge'},
+    );
+    const notes = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(notes).toMatch(/frees this Pokemon from its own single-move lock/);
+    expect(notes).toMatch(/prefer a target that relies on options/);
+  });
+  it('Coil 与催眠术组合：命中提升构成偷回合计划', () => {
+    const input = setup();
+    input.dex.species.milotic = {name: 'Milotic', types: ['Water'], baseStats: {hp: 95, atk: 60, def: 79, spa: 100, spd: 125, spe: 81}, abilities: {0: 'Competitive'}};
+    input.request.side.pokemon.push(
+      {ident: 'p1: Milotic', details: 'Milotic, L50, M', condition: '190/190', active: false,
+        stats: {spe: 115}, moves: ['muddywater', 'coil', 'hypnosis', 'recover'], item: 'leftovers', ability: 'competitive'},
+    );
+    const notes = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
+    expect(notes).toMatch(/raises Hypnosis to 80%/);
+    expect(notes).toMatch(/buys free turns/);
+  });
   it('数据驱动：形态变体按自身当前招式与特性获得注解，不依赖物种标签', () => {
     const input = setup();
     input.dex.species.golisopodother = {...input.dex.species.golisopod, name: 'Golisopod-Other', baseSpecies: 'Golisopod'};
@@ -291,6 +324,7 @@ describe('buildAnalysisContext 条件化角色', () => {
     const notes = buildAnalysisContext(input).teamNotes[3].notes.join(' ');
     expect(notes).toMatch(/Intimidate.*before Mega/);
     expect(notes).toMatch(/Salamencite.*Aerilate.*Hyper Voice/);
+    expect(notes).toMatch(/Flying is super effective against Grass, Fighting and Bug types/);
     input.request.side.pokemon[3].item = 'leftovers';
     expect(buildAnalysisContext(input).teamNotes[3].notes.join(' ')).not.toMatch(/Aerilate|Salamencite/);
     input.request.side.pokemon[3].details = 'Salamence-Mega, L50';
@@ -306,6 +340,7 @@ describe('buildAnalysisContext 条件化角色', () => {
     const text = buildAnalysisContext(input).teamNotes[3].notes.join(' ');
     expect(text).toMatch(/already Mega Evolved/);
     expect(text).toMatch(/current Aerilate.*Hyper Voice/);
+    expect(text).toMatch(/Flying is super effective against Grass, Fighting and Bug types/);
     expect(text).not.toMatch(/Mega option|not the current ability/);
   });
   it('已用掉 Mega 后其他候选不再获得未来 Mega 特性的战术加成', () => {
@@ -370,6 +405,7 @@ describe('buildAnalysisContext 新增条件注解（Reg M-C 热点）', () => {
     const notes = buildAnalysisContext(input).teamNotes;
     const corv = notes[4].notes.join(' ');
     expect(corv).toMatch(/Tailwind.*speed/i);
+    expect(corv).toMatch(/worth trying/);
     expect(corv).toMatch(/Yawn.*sleep|Yawn.*switch/i);
     expect(corv).toMatch(/Aurora Veil.*halves/i);
     expect(corv).toMatch(/U-turn|Flip Turn|pivot/i);

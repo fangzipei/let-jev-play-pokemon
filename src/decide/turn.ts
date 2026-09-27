@@ -1,6 +1,7 @@
 import {megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
 import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
+import {estimatedMove, megaSkinAbility, superEffectivePhrase} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
   activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
@@ -61,13 +62,42 @@ export function megaNameOf(dex: DexData, species: string, item?: string): string
   return 'unknown Mega form';
 }
 
-/** mega 选项描述：形态名 + 变更后的特性与速度（缺数据时退化为形态名） */
+/** mega 形态的属性变化对照表（未变化的属性不列出） */
+const MEGA_STAT_LABELS: Array<[string, string]> = [['atk', 'Atk'], ['def', 'Def'], ['spa', 'SpA'], ['spd', 'SpD'], ['spe', 'Speed']];
+
+/** mega 选项描述：形态名 + 特性与变更后属性（缺数据时退化为形态名） */
 function megaSummaryOf(dex: DexData, species: string, item?: string): string {
   const form = megaFormsOf(dex, species).find(f => !!f.requiredItem && (item === undefined || toId(f.requiredItem) === toId(item)));
   if (!form) return megaNameOf(dex, species, item);
   const ability = Object.values(form.abilities ?? {})[0];
-  const details = [ability ? `ability ${ability}` : '', form.baseStats.spe !== undefined ? `Speed ${form.baseStats.spe}` : ''].filter(Boolean);
+  const baseStats = dex.species[toId(form.baseSpecies ?? species)]?.baseStats;
+  const changes = baseStats ? MEGA_STAT_LABELS.flatMap(([stat, label]) => {
+    const from = baseStats[stat];
+    const to = form.baseStats[stat];
+    return from !== undefined && to !== undefined && from !== to ? [`${label} ${from}→${to}`] : [];
+  }) : [];
+  const details = [ability ? `ability ${ability}` : '', ...changes].filter(Boolean);
   return details.length ? `${form.name} (${details.join(', ')})` : form.name;
+}
+
+/** 皮肤型 Mega（-ate 特性）的打击面说明：转换后属性 + 其克制列表；未发生转换或天气已改属性时 null */
+function skinCoverageOf(dex: DexData, skinAbility: string, moveId: string, moveType: string, weather: string | undefined): string | null {
+  const skinType = estimatedMove(moveId, moveType, undefined, skinAbility).type;
+  if (toId(skinType) === toId(moveType)) return null;
+  // 天气已改变属性（如气象球）时皮肤不叠加，避免与头部显示不一致
+  if (toId(estimatedMove(moveId, moveType, weather, skinAbility).type) !== toId(skinType)) return null;
+  const coverage = superEffectivePhrase(dex, skinType);
+  return `post-Mega this move becomes ${skinType}-type${coverage ? ` and is super effective against ${coverage} foes` : ''}`;
+}
+
+/** 对手是否物攻向：优先按已揭示招式的类别（物攻不劣于特攻即算），无揭示时按 baseStats atk ≥ spa */
+function isPhysicalAttacker(dex: DexData, p: PokemonState): boolean {
+  const categories = p.revealedMoves.map(m => dex.moves[toId(m)]?.category);
+  const physical = categories.filter(c => c === 'Physical').length;
+  const special = categories.filter(c => c === 'Special').length;
+  if (physical + special > 0) return physical >= special;
+  const stats = dex.species[toId(p.species)]?.baseStats;
+  return !!stats && (stats.atk ?? 0) >= (stats.spa ?? 0);
 }
 
 /** 群攻选项警示：对手在场且已揭示 Wide Guard——可完全挡下（0 伤害）且可连续使用，没有 Protect 链条的失败率。 */
@@ -144,6 +174,9 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     ? (tracker.state.sides[tracker.state.ourSideId === 'p1' ? 'p2' : 'p1']?.pokemon ?? [])
       .filter(p => p.activePos >= 0 && !p.fainted && p.revealedMoves.some(m => toId(m) === 'wideguard'))
     : [];
+  // 对手在场物攻向数量：物攻手越多，Coil 等防御强化选项的即时价值越高
+  const physicalFoes = (tracker.state.sides[tracker.state.ourSideId === 'p1' ? 'p2' : 'p1']?.pokemon ?? [])
+    .filter(p => p.activePos >= 0 && !p.fainted && isPhysicalAttacker(dex, p)).length;
   // 上场后首个行动回合：Fake Out 唯一可用窗口，讲究道具的首个选择即锁招
   const firstActionSinceSwitchIn = trackedSelf?.switchInTurn === undefined
     ? undefined
@@ -163,7 +196,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     for (const spec of targetSpecsFor(mv.target, slot, foes.length)) {
       const key = `move_${j + 1}${spec.suffix}`;
       const foe = spec.foeIndex != null ? foes[spec.foeIndex] : undefined;
-      const label = describeMoveOption({
+      const optionInput = {
         dex,
         moveId: mv.id,
         moveName: mv.move,
@@ -184,17 +217,27 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         attackerHpPercent: conditionPercent(me.condition),
         firstActionSinceSwitchIn,
         attackerItem: me.item,
+        attackerMoves: reqActive.moves.map(entry => entry.id),
         opponentMegaUsed,
         attackerMainAttack: mainAttack,
         ourLiveSpeeds,
-      }) + (hitsBoth && wideGuardFoes.length ? wideGuardFoes.map(wideGuardWarning).join('') : '');
+        activeFoes: foes.flatMap(f => (f.ident ? [f.ident] : [])),
+        physicalFoes,
+      };
+      const wideSuffix = hitsBoth && wideGuardFoes.length ? wideGuardFoes.map(wideGuardWarning).join('') : '';
+      const described = describeMoveOption(optionInput);
+      const label = described + wideSuffix;
       const action: SlotMoveAction = {kind: 'move', slot, moveIndex: j + 1};
       if (spec.target) action.target = spec.target;
       options.push({key, label, action});
       if (canMega) {
+        // 皮肤型 Mega（Salamencite→Aerilate 等）：mega 变体的属性/本系/威力按 post-Mega 形态重算，普通选项保持当前形态
+        const skin = megaSkinAbility(dex, species, me.item);
+        const megaLabel = skin ? describeMoveOption({...optionInput, attackerAbility: skin}) : described;
+        const coverage = skin && moveInfo ? skinCoverageOf(dex, skin, mv.id, moveInfo.type, weather) : null;
         options.push({
           key: `${key}_mega`,
-          label: `${label} — MEGA EVOLVE ${species} into ${megaSummaryOf(dex, species, me.item)} with this move (your team's only Mega; the form change resolves before any moves this turn, so the new ability and stats including Speed apply immediately; declaring it early is usually better — the Mega is wasted if this Pokemon faints before you declare it)`,
+          label: `${megaLabel}${wideSuffix} — MEGA EVOLVE ${species} into ${megaSummaryOf(dex, species, me.item)} with this move (${coverage ? `${coverage}; ` : ''}your team's only Mega; the form change resolves at the start of the turn before any moves, so the new stats and ability already apply this turn — including to this attack and this turn's move order; it also still happens if this Pokemon cannot act this turn (asleep, paralyzed or flinching))`,
           action: {...action, mega: true},
         });
       }
