@@ -1,4 +1,5 @@
 import type {DexData} from '../dex/index.js';
+import type {ChooseAction} from '../ps/choose.js';
 import {findOurPokemon} from '../state/analysis.js';
 import {hasEntryWeatherSetter} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
@@ -6,7 +7,7 @@ import {
   activeEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
   type BattleRequest, type RequestPokemon,
 } from '../state/request.js';
-import {opponentActives, type OpponentActive} from '../state/serialize.js';
+import {fakeOutThreats, megaStoneSwapRisk, opponentActives, type OpponentActive} from '../state/serialize.js';
 import {speedControlOf} from '../state/speed-control.js';
 import type {BattleState, BattleTracker} from '../state/tracker.js';
 import type {SlotQuestionPlan} from './turn.js';
@@ -110,12 +111,18 @@ interface FoeTarget {
   index: number;
 }
 
-/** 最慢的在场对手，且 base Speed 不高于套围巾的阈值；速度未知或过快的目标都会被排除。 */
-function slowestFoe(dex: DexData, foes: OpponentActive[]): FoeTarget | null {
+/** 慢速候选：base Speed 已知且不高于套围巾阈值；速度未知或过快的目标都会被排除。 */
+function isSlowFoe(dex: DexData, foe: OpponentActive): boolean {
+  const spe = dex.species[toId(foe.species)]?.baseStats?.spe;
+  return spe !== undefined && spe <= SLOW_FOE_SPE_CAP;
+}
+
+/** 最慢的在场对手；exclude 命中（如 Mega 石风险目标）的对手被跳过，下标保持传入数组的原位置用于目标后缀映射。 */
+function slowestFoe(dex: DexData, foes: OpponentActive[], exclude?: (foe: OpponentActive) => boolean): FoeTarget | null {
   const ranked = foes
     .map((foe, index) => ({foe, index, spe: dex.species[toId(foe.species)]?.baseStats?.spe}))
     .filter((entry): entry is {foe: OpponentActive; index: number; spe: number} =>
-      entry.spe !== undefined && entry.spe <= SLOW_FOE_SPE_CAP)
+      entry.spe !== undefined && entry.spe <= SLOW_FOE_SPE_CAP && !exclude?.(entry.foe))
     .sort((a, b) => a.spe - b.spe || a.index - b.index);
   return ranked[0] ? {foe: ranked[0].foe, index: ranked[0].index} : null;
 }
@@ -129,6 +136,31 @@ function fastestAwakeFoe(dex: DexData, foes: OpponentActive[]): FoeTarget | null
   return ranked[0] ? {foe: ranked[0].foe, index: ranked[0].index} : null;
 }
 
+/** 换入型指令的槽位选择：目标换入选项存在、槽位空闲且该换入 key 未被其他指令占用时，选 HP 最低的槽位。 */
+function switchSlotFor(input: {
+  request: BattleRequest;
+  plans: SlotQuestionPlan[];
+  actives: RequestPokemon[];
+  busy: Set<number>;
+  /** 已使用的换入 key：同一只替补不能在一回合被两条指令重复换入 */
+  takenKeys: Set<string>;
+  setter: RequestPokemon;
+}): {slot: 1 | 2; key: string} | null {
+  const key = `switch_${teamSlotOf(input.request, input.setter)}`;
+  if (input.takenKeys.has(key)) return null;
+  const candidates = input.plans
+    .filter(plan => plan.questionName.startsWith('action_slot_') && !input.busy.has(plan.slot))
+    .map(plan => {
+      const option = plan.options.find(entry => entry.key === key && entry.action.kind === 'switch');
+      const me = input.actives[plan.slot - 1];
+      return option && me ? {plan, hp: conditionPercent(me.condition)} : null;
+    })
+    .filter((entry): entry is {plan: SlotQuestionPlan; hp: number} => entry !== null)
+    .sort((a, b) => a.hp - b.hp || a.plan.slot - b.plan.slot);
+  const pick = candidates[0];
+  return pick ? {slot: pick.plan.slot, key} : null;
+}
+
 /** 场地被对手覆盖时，把替补中存活的场地手换回来抢回场地（选 HP 最低且未被其他指令占用的槽位）。 */
 function terrainDirective(input: {
   dex: DexData;
@@ -137,34 +169,76 @@ function terrainDirective(input: {
   plans: SlotQuestionPlan[];
   actives: RequestPokemon[];
   busy: Set<number>;
+  takenKeys: Set<string>;
 }): TurnDirective | null {
-  const {dex, request, state, plans, actives, busy} = input;
+  const {dex, request, state, plans, actives, busy, takenKeys} = input;
   const contested = state.fieldConditions.find(field => CONTESTED_TERRAINS.has(toId(field.replace(/^move:\s*/i, ''))));
   if (!contested) return null;
   const setter = request.side.pokemon.find(pokemon =>
     !pokemon.active && !isFainted(pokemon.condition) && isSurgeSetter(dex, speciesOf(pokemon)));
   if (!setter) return null;
-  const key = `switch_${teamSlotOf(request, setter)}`;
-  const candidates = plans
-    .filter(plan => plan.questionName.startsWith('action_slot_') && !busy.has(plan.slot))
-    .map(plan => {
-      const option = plan.options.find(entry => entry.key === key && entry.action.kind === 'switch');
-      const me = actives[plan.slot - 1];
-      return option && me ? {plan, hp: conditionPercent(me.condition)} : null;
-    })
-    .filter((entry): entry is {plan: SlotQuestionPlan; hp: number} => entry !== null)
-    .sort((a, b) => a.hp - b.hp || a.plan.slot - b.plan.slot);
-  const pick = candidates[0];
-  if (!pick) return null;
+  const picked = switchSlotFor({request, plans, actives, busy, takenKeys, setter});
+  if (!picked) return null;
   return {
-    slot: pick.plan.slot,
-    key,
+    slot: picked.slot,
+    key: picked.key,
     note: `hard:terrain: ${speciesOf(setter)} re-enters to contest ${contested}`,
   };
 }
 
+/** H8 Fake Out 防御：对手场上有刚上场的已知 Fake Out 手时，把替补的精神场地手换入——换人先于招式结算，精神场地让 Fake Out 打不到地面目标。 */
+function fakeOutGuardDirective(input: {
+  request: BattleRequest;
+  state: BattleState;
+  plans: SlotQuestionPlan[];
+  actives: RequestPokemon[];
+  busy: Set<number>;
+  takenKeys: Set<string>;
+}): TurnDirective | null {
+  const {request, state, plans, actives, busy, takenKeys} = input;
+  const threats = fakeOutThreats(state);
+  if (!threats.length) return null;
+  const setter = request.side.pokemon.find(pokemon =>
+    !pokemon.active && !isFainted(pokemon.condition)
+    && toId(pokemon.ability ?? pokemon.baseAbility ?? '') === 'psychicsurge');
+  if (!setter) return null;
+  const picked = switchSlotFor({request, plans, actives, busy, takenKeys, setter});
+  if (!picked) return null;
+  return {
+    slot: picked.slot,
+    key: picked.key,
+    note: `hard:fakeout: ${speciesOf(setter)} re-enters to set Psychic Terrain and block Fake Out from ${threats.join(', ')}`,
+  };
+}
+
+/** H9 雨天覆盖：场上天气为雨时，把替补的班基拉斯换入——Sand Stream 进场沙暴立即覆盖雨天，终结对手的雨天收益。 */
+function rainCoverDirective(input: {
+  dex: DexData;
+  request: BattleRequest;
+  state: BattleState;
+  plans: SlotQuestionPlan[];
+  actives: RequestPokemon[];
+  busy: Set<number>;
+  takenKeys: Set<string>;
+}): TurnDirective | null {
+  const {dex, request, state, plans, actives, busy, takenKeys} = input;
+  const weatherId = toId(state.weather ?? '');
+  if (weatherId !== 'raindance' && weatherId !== 'rain') return null;
+  const setter = request.side.pokemon.find(pokemon =>
+    !pokemon.active && !isFainted(pokemon.condition)
+    && toId(dex.species[toId(speciesOf(pokemon))]?.baseSpecies ?? speciesOf(pokemon)).replace(/mega[xy]?$/, '') === 'tyranitar');
+  if (!setter) return null;
+  const picked = switchSlotFor({request, plans, actives, busy, takenKeys, setter});
+  if (!picked) return null;
+  return {
+    slot: picked.slot,
+    key: picked.key,
+    note: `hard:rain-cover: ${speciesOf(setter)} re-enters with Sand Stream to overwrite the foes' rain`,
+  };
+}
+
 /**
- * 收集本回合的硬指令（按优先级 H5 → H2 → H3 → H4，每个槽位最多一条）。
+ * 收集本回合的硬指令（按优先级 H5 → H2 → H3 → H4 → H8 → H9，每个槽位最多一条）。
  * force-switch 阶段（无 request.active）没有可覆盖的招式选择，直接返回空。
  */
 export function collectTurnDirectives(input: {
@@ -210,15 +284,19 @@ export function collectTurnDirectives(input: {
         continue;
       }
     }
-    // H2：持讲究围巾 + Trick 可用 + 对手有慢速目标 → 把围巾套给最慢者（锁招收益最大）
+    // H2：持讲究围巾 + Trick 可用 + 对手有慢速目标 → 把围巾套给最慢者（锁招收益最大）。
+    // Mega 石无法被 Trick 交换（#43 T4 实证）：已 Mega 或可能持石的慢速目标必须跳过，否则整回合空过。
     if (toId(me.item ?? '') === 'choicescarf') {
-      const target = slowestFoe(dex, foes);
+      const megaRisk = (foe: OpponentActive) => megaStoneSwapRisk(dex, foe) !== null;
+      const target = slowestFoe(dex, foes, megaRisk);
       const key = target ? optionKeyFor('trick', target.index) : null;
       if (target && key) {
+        const skipped = foes.filter(foe => megaRisk(foe) && isSlowFoe(dex, foe)).map(foe => foe.species);
+        const skipNote = skipped.length ? ` (skipped for Mega-stone risk: ${skipped.join(', ')})` : '';
         directives.push({
           slot: plan.slot,
           key,
-          note: `hard:trick: ${speciesOf(me)} swaps a Choice Scarf onto ${target.foe.species}`,
+          note: `hard:trick: ${speciesOf(me)} swaps a Choice Scarf onto ${target.foe.species}${skipNote}`,
         });
         busy.add(plan.slot);
         continue;
@@ -241,7 +319,77 @@ export function collectTurnDirectives(input: {
     }
   }
   // H4：场地被覆盖 + 场地手存活在替补 → 换入抢回（不被 H2/H3 占用的槽位）
-  const terrain = terrainDirective({dex, request, state, plans, actives, busy});
-  if (terrain) directives.push(terrain);
+  const takenKeys = new Set<string>();
+  const terrain = terrainDirective({dex, request, state, plans, actives, busy, takenKeys});
+  if (terrain) {
+    directives.push(terrain);
+    busy.add(terrain.slot);
+    takenKeys.add(terrain.key);
+  }
+  // H8：对手已知 Fake Out 手刚上场 → 换入爱管侍开精神场地挡招（不占已用槽位，也不重复换同一只）
+  const fakeout = fakeOutGuardDirective({request, state, plans, actives, busy, takenKeys});
+  if (fakeout) {
+    directives.push(fakeout);
+    busy.add(fakeout.slot);
+    takenKeys.add(fakeout.key);
+  }
+  // H9：对手雨天生效 → 换入班基拉斯用沙暴覆盖（不占已用槽位，也不重复换同一只）
+  const rain = rainCoverDirective({dex, request, state, plans, actives, busy, takenKeys});
+  if (rain) {
+    directives.push(rain);
+    busy.add(rain.slot);
+    takenKeys.add(rain.key);
+  }
   return directives;
+}
+
+// ---------- 最终动作校正（H7） ----------
+
+/**
+ * H7 强制 Mega：我方班基拉斯在场时，只要它的动作存在 Mega 变体（持石、非状态招），就强制声明 Mega。
+ * - 模型选了普通招式 → 从既有选项升级为对应 _mega 变体（不构造新动作，始终合法）；
+ * - 班基拉斯声明 Mega 后，其他槽位的 Mega 声明让位（本局唯一 Mega 归班基拉斯）；
+ * - 班基拉斯不在场、未选中招式或没有 Mega 变体（没带石 / Protect 等状态招）时不动任何槽位，避免误伤。
+ * 在 degradeMegaConflicts 之后对最终动作调用：同时覆盖“模型放弃 Mega”与“双 Mega 让位降级”两条路径。
+ */
+export function enforceTyranitarMega(input: {
+  dex: DexData;
+  request: BattleRequest;
+  plans: SlotQuestionPlan[];
+  actions: ChooseAction[];
+}): {actions: ChooseAction[]; notes: string[]} {
+  const {dex, request, plans, actions} = input;
+  const notes: string[] = [];
+  if (!request.active) return {actions, notes};
+  const actives = activeEntries(request);
+  const ttIndex = actives.findIndex(me =>
+    toId(dex.species[toId(speciesOf(me))]?.baseSpecies ?? speciesOf(me)).replace(/mega[xy]?$/, '') === 'tyranitar');
+  if (ttIndex < 0) return {actions, notes};
+  const slot = (ttIndex + 1) as 1 | 2;
+  const ttAction = actions.find(action => action.kind === 'move' && action.slot === slot);
+  if (ttAction?.kind !== 'move') return {actions, notes};
+  // 未声明 Mega 时，只从该槽位的既有选项里找同动作（招式下标与目标一致）的 _mega 变体；找不到就不干预
+  let upgrade = false;
+  if (ttAction.mega !== true) {
+    const options = plans.find(plan => plan.slot === slot)?.options ?? [];
+    const base = options.find(option => option.action.kind === 'move'
+      && option.action.slot === slot
+      && option.action.moveIndex === ttAction.moveIndex
+      && option.action.target === ttAction.target
+      && !option.key.endsWith('_mega'));
+    if (!base || !options.some(option => option.key === `${base.key}_mega`)) return {actions, notes};
+    upgrade = true;
+  }
+  // 本局唯一 Mega 归班基拉斯：其他槽位已声明的 Mega 让位
+  const downgraded: number[] = [];
+  const result = actions.map(action => {
+    if (action.kind !== 'move') return action;
+    if (action.slot === slot) return upgrade ? {...action, mega: true} : action;
+    if (!action.mega) return action;
+    downgraded.push(action.slot);
+    return {...action, mega: undefined};
+  });
+  if (upgrade) notes.push(`hard:mega: Tyranitar must Mega Evolve - this slot's action was upgraded to its Mega variant`);
+  if (downgraded.length) notes.push(`hard:mega: slot ${downgraded.join(', ')} Mega declaration downgraded - Tyranitar takes the team's only Mega Evolve`);
+  return {actions: result, notes};
 }

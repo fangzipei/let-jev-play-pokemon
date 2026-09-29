@@ -240,6 +240,7 @@ describe('buildAnalysisContext 条件化角色', () => {
     const sneasler = notes[5].notes.join(' ');
     expect(sneasler).toMatch(/Unburden.*consumed/i);
     expect(sneasler).toMatch(/Trick swaps held items/i);
+    expect(sneasler).toMatch(/Mega Stones cannot be swapped/);
     const milotic = notes[6].notes.join(' ');
     expect(milotic).toMatch(/Competitive.*Special Attack/i);
     expect(notes.slice(4).map(n => n.notes.join(' ')).join(' ')).not.toMatch(/permanent|fastest/);
@@ -309,6 +310,7 @@ describe('buildAnalysisContext 条件化角色', () => {
     const notes = buildAnalysisContext(input).teamNotes[4].notes.join(' ');
     expect(notes).toMatch(/frees this Pokemon from its own single-move lock/);
     expect(notes).toMatch(/prefer a target that relies on options/);
+    expect(notes).toMatch(/Mega Stones cannot be swapped/);
   });
   it('Coil 与催眠术组合：命中提升构成偷回合计划', () => {
     const input = setup();

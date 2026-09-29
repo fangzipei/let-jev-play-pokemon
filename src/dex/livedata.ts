@@ -144,6 +144,8 @@ export function filterDataTable(name: DataName, raw: unknown): DataTable {
       copyText('name');
       copyText('baseSpecies');
       copyText('requiredItem');
+      // 体重（踢倒等按体重定威力的招式数据源）：只保留有限正数
+      if (typeof entry.weightkg === 'number' && Number.isFinite(entry.weightkg) && entry.weightkg > 0) clean.weightkg = entry.weightkg;
     } else {
       if (typeof entry.type === 'string' && TYPES.has(entry.type)) clean.type = entry.type;
       if (typeof entry.basePower === 'number' && Number.isFinite(entry.basePower) && entry.basePower >= 0) clean.basePower = entry.basePower;

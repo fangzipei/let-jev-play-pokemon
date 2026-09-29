@@ -1,5 +1,5 @@
 import {canMegaWith, megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
-import {effectiveness, entryWeatherOf, estimateDamagePercent, estimatedMove, hpScaledBasePower, knownEffectiveness, megaSkinAbility, neutralSpeedTier, weatherAdjustedType} from './calc.js';
+import {effectiveness, entryWeatherOf, estimateDamagePercent, estimatedMove, hpScaledBasePower, knownEffectiveness, lowKickPower, megaSkinAbility, neutralSpeedTier, weatherAdjustedType} from './calc.js';
 import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisContext, type OppSpeedEstimate, type OurSpeed, type TeamThreat} from './analysis.js';
 import type {OpponentNoteSet} from './opponent-notes.js';
 import {buildBattleContext, seenInBattle} from './battle-context.js';
@@ -20,6 +20,12 @@ export interface OpponentActive {
   ability?: string | null;
   /** 在场对手的当前能力阶级（伤害估算按当前值折算） */
   boosts?: Record<string, number>;
+  /** 已 Mega 进化（Mega 石仍在身上；Trick 交换必失败） */
+  mega?: boolean;
+  /** 已揭示的持道具（null/undefined = 未揭示） */
+  item?: string | null;
+  /** 持道具已消耗/被打掉（当前空手） */
+  consumedItem?: boolean;
 }
 
 /** 对手场上宝可梦，按参战位置排序：index 0 对应 TARGETSPEC `+1`，index 1 对应 `+2` */
@@ -40,7 +46,25 @@ export function opponentActives(dex: DexData, state: BattleState): OpponentActiv
       revealedMoves: p.revealedMoves,
       ability: p.ability ?? null,
       boosts: p.boosts,
+      mega: p.mega === true,
+      item: p.item ?? null,
+      consumedItem: p.consumedItem === true,
     }));
+}
+
+/**
+ * 对手在场、处首个行动窗口（刚上场）且已揭示 Fake Out 的威胁物种；
+ * 精神场地已激活时 Fake Out 无法命中地面目标，不再计为威胁。
+ */
+export function fakeOutThreats(state: BattleState): string[] {
+  const oppSideId = state.ourSideId === 'p1' ? 'p2' : 'p1';
+  const psychicTerrain = state.fieldConditions.some(field => toId(field.replace(/^move:\s*/i, '')) === 'psychicterrain');
+  if (psychicTerrain) return [];
+  return (state.sides[oppSideId]?.pokemon ?? [])
+    .filter(p => p.activePos >= 0 && !p.fainted
+      && p.switchInTurn !== undefined && state.turn - p.switchInTurn <= 1
+      && p.revealedMoves.some(move => toId(move) === 'fakeout'))
+    .map(p => p.species);
 }
 
 function speedFields(speed: OurSpeed | undefined) {
@@ -78,6 +102,12 @@ export interface SerializeInput {
   opponentNotes?: Record<string, OpponentNoteSet> | null;
 }
 
+/** pokedex 中该物种的全部候选特性（含未选中的隐藏/特殊槽位），按 0/1/H/S 键序去重；数据缺失时返回空数组 */
+function possibleAbilitiesOf(dex: DexData, species: string): string[] {
+  const abilities = dex.species[toId(species)]?.abilities ?? {};
+  return [...new Set(['0', '1', 'H', 'S'].flatMap(key => abilities[key] ? [abilities[key]!] : []))];
+}
+
 export function buildStatePayload({state, request, dex, analysis, opponentNotes}: SerializeInput): Record<string, unknown> {
   const battleContext = buildBattleContext({state, request});
   const ourSideId = request.side.id;
@@ -92,6 +122,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
       slot, ident: p.ident, species: speciesOf(p), details: p.details, hp: p.condition,
       item: p.item ?? null, ability: p.ability ?? null, base_ability: p.baseAbility ?? null,
       moves: p.moves ?? null, stats: p.stats ?? null, types: speciesTypes(dex, speciesOf(p)),
+      possible_abilities: possibleAbilitiesOf(dex, speciesOf(p)),
       boosts: p.active ? tracked?.boosts ?? {} : {},
       ...(p.active && tracked?.perish !== undefined ? {perish: tracked.perish} : {}),
       volatiles: p.active ? tracked?.volatiles ?? [] : [], single_turn: p.active ? tracked?.singleTurn ?? [] : [],
@@ -118,7 +149,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
       ident: p.ident, species: p.species, active_position: p.activePos, seen_in_battle: seen,
       hp_percent: seen ? p.hpPercent : null, status: seen ? p.status : null,
       ...(p.perish !== undefined ? {perish: p.perish} : {}),
-      types: speciesTypes(dex, p.species), boosts: p.activePos >= 0 && !p.fainted ? p.boosts : {}, revealed_moves: p.revealedMoves,
+      types: speciesTypes(dex, p.species), possible_abilities: possibleAbilitiesOf(dex, p.species), boosts: p.activePos >= 0 && !p.fainted ? p.boosts : {}, revealed_moves: p.revealedMoves,
       item_revealed: p.consumedItem ? null : p.item ?? null, ability_revealed: p.ability ?? null,
       item_consumed: p.consumedItem ?? false, volatiles: p.volatiles, single_turn: p.singleTurn,
       ...(analysis ? {base_speed: speed?.baseSpeed ?? null, speed: null, speed_notes: speed?.notes ?? ['unknown'],
@@ -136,7 +167,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     seen_count: opponents.filter(p => seenInBattle(p)).length,
     active: opponents.filter(p => p.activePos >= 0).sort((a, b) => a.activePos - b.activePos).map(opponentPokemon),
     bench: opponents.filter(p => p.activePos < 0 && seenInBattle(p)).map(opponentPokemon),
-    unseen_from_preview: opponents.filter(p => !seenInBattle(p)).map(p => ({species: p.species, types: speciesTypes(dex, p.species)})),
+    unseen_from_preview: opponents.filter(p => !seenInBattle(p)).map(p => ({species: p.species, types: speciesTypes(dex, p.species), possible_abilities: possibleAbilitiesOf(dex, p.species)})),
     ...(analysis ? {preview: opponents.map(opponentPokemon)} : {}),
   };
 
@@ -168,7 +199,13 @@ export interface MoveOptionInput {
   attackerBoosts?: Record<string, number>;
   /** 攻击方当前特性（Adaptability 等本系加成修正） */
   attackerAbility?: string;
-  target?: {label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>};
+  target?: {label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>;
+    /** 已 Mega 进化（Mega 石不可交换，Trick 会失败） */
+    mega?: boolean;
+    /** 已揭示的持道具（null/undefined = 未揭示） */
+    item?: string | null;
+    /** 持道具已消耗/被打掉（当前空手） */
+    consumedItem?: boolean};
   /** 群攻招式的每个目标：为每个对手各出一条伤害估算（单目标招式沿用 target） */
   targets?: Array<{label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>}>;
   analysis?: AnalysisContext;
@@ -222,6 +259,13 @@ function hpScaledPower(input: MoveOptionInput): number | undefined {
   return hpScaledBasePower(input.dex, input.moveId, input.attackerHpPercent) ?? undefined;
 }
 
+/** 踢倒按目标体重换算威力：目标体重数据缺失时 undefined（保持 damage unknown 降级，不猜测） */
+function lowKickPowerFor(input: MoveOptionInput): number | undefined {
+  if (toId(input.moveId) !== 'lowkick' || !input.target) return undefined;
+  const weight = input.dex.species[toId(input.target.species)]?.weightkg;
+  return weight === undefined ? undefined : lowKickPower(weight);
+}
+
 /** Mega 形态特性对特定属性的免疫（属性型免疫表，用于招式警示） */
 const MEGA_ABILITY_IMMUNITY: Record<string, string> = {
   levitate: 'ground', flashfire: 'fire', lightningrod: 'electric', motordrive: 'electric',
@@ -239,6 +283,24 @@ function megaImmunityWarning(dex: DexData, targetSpecies: string, moveType: stri
     return `caution: ${targetSpecies} can Mega Evolve into ${mega.name} before any moves this turn; if it does, ${ability} makes this ${moveType}-type move deal no damage`;
   }
   return null;
+}
+
+/**
+ * Trick 交换目标道具的失败风险（sim takeItem 对本人 Mega 石否决换手）：
+ * - 'certain'：已 Mega 或已揭示自身 Mega 石 —— 交换必失败；
+ * - 'likely'：有 Mega 形态且道具未揭示 —— 可能持 Mega 石，规避为宜；
+ * - null：无 Mega 形态，或道具已揭示为普通道具/已消耗 —— 不会因 Mega 石失败。
+ */
+export function megaStoneSwapRisk(
+  dex: DexData,
+  target: {species: string; mega?: boolean; item?: string | null; consumedItem?: boolean},
+): 'certain' | 'likely' | null {
+  const forms = megaFormsOf(dex, target.species);
+  if (!forms.length) return null;
+  if (target.mega) return 'certain';
+  if (target.consumedItem) return null;
+  if (target.item) return forms.some(f => toId(f.requiredItem ?? '') === toId(target.item!)) ? 'certain' : null;
+  return 'likely';
 }
 
 /** move 选项级战术注解：全部由真实机制与当前对局数据驱动，不设物种白名单 */
@@ -297,6 +359,15 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
     if (trickChoice) {
       const speedNote = toId(input.attackerItem ?? '') === 'choicescarf' ? ' with the x1.5 Speed' : '';
       notes.push(`Trick swaps held items with the target: it inherits this Pokemon's ${trickChoice}${speedNote} and, once it uses a move while holding it, is locked into repeating that move; this Pokemon takes the target's item and, no longer Choice-locked, can select any move again — prefer a target that relies on options (slow, defensive or support pieces), since a fast attacker may gain more from the speed than the lock costs it`);
+    }
+    // Mega 石不可被 Trick 交换（sim takeItem 否决）：逐目标给出失败风险警告
+    if (input.target) {
+      const risk = megaStoneSwapRisk(input.dex, input.target);
+      if (risk === 'certain') {
+        notes.push(`warning: Trick will fail against ${input.target.species}: Mega Stones cannot be swapped${input.target.mega ? ', and it has already Mega Evolved so it still holds its Mega Stone' : ', and it currently holds its Mega Stone'}; pick another target or move`);
+      } else if (risk === 'likely') {
+        notes.push(`warning: Trick may fail against ${input.target.species}: it can Mega Evolve and its held item is unrevealed, so it may be holding its Mega Stone, which Trick cannot swap; prefer a target with no Mega form or with a revealed different item`);
+      }
     }
   }
   const bp = lastRespectsPower(input);
@@ -456,7 +527,9 @@ export function describeMoveOption(input: MoveOptionInput): string {
   // 气象球随当前天气改属性并翻倍威力（晴 → Fire/100BP）；-ate 皮肤转属性并加 1.2x 威力，头部与估算保持一致
   const est = move ? estimatedMove(input.moveId, move.type, input.weather, input.attackerAbility) : undefined;
   const moveType = est?.type;
-  const shownPower = move && est ? Math.round(move.basePower * est.powerMultiplier) : undefined;
+  // 踢倒显示按目标体重换算的真实威力；无体重数据时不猜测（保持 0BP + damage unknown 降级）
+  const lowKickBP = lowKickPowerFor(input);
+  const shownPower = move && est ? Math.round((lowKickBP ?? move.basePower) * est.powerMultiplier) : undefined;
   const head = `${input.moveName} [${moveType ?? '?'}/${move?.category ?? '?'}/${shownPower ?? '?'}BP/PP ${input.pp}/${input.maxpp}${
     move && move.priority ? `/priority ${move.priority}` : ''
   }]`;
@@ -467,7 +540,7 @@ export function describeMoveOption(input: MoveOptionInput): string {
   if (input.hitsBoth) extras.push(spreadPenalty
     ? 'hits both foes (0.75x spread)'
     : 'hits the remaining foe at full power: the spread reduction applies only when a move hits more than one target');
-  if (move && move.basePower > 0) {
+  if (move && (move.basePower > 0 || lowKickBP !== undefined)) {
     const type = moveType ?? move.type;
     if (targets.length) {
       for (const target of targets) {
@@ -476,10 +549,14 @@ export function describeMoveOption(input: MoveOptionInput): string {
           attackerStats: input.attackerStats, attackerAbility: input.attackerAbility,
           attackerBoosts: input.attackerBoosts, defenderBoosts: target.boosts,
           defenderSpecies: target.species,
-          isSpread: spreadPenalty, weather: input.weather, powerOverride: lastRespectsPower(input) ?? hpScaledPower(input),
+          isSpread: spreadPenalty, weather: input.weather, powerOverride: lastRespectsPower(input) ?? hpScaledPower(input) ?? lowKickBP,
         });
         const eff = effectiveness(input.dex, type, speciesTypes(input.dex, target.species));
         extras.push(`vs ${target.label} (${target.species}, ${target.hpPercent}% HP): ≈${pct ?? '?'}% damage${eff !== 1 ? ` (${eff}x)` : ''}`);
+        // 估算达到致死线 → 显式提示可秒杀（如踢倒对班基拉斯）
+        if (pct !== null && pct >= 100) {
+          extras.push(`this move can knock out ${target.label} (${target.species}) if it stays in — the estimate reaches lethal damage on the current HP`);
+        }
         // 对手睡眠：第一次行动必失败、第二次只有 1/3 机会醒来——现在是放心输出的窗口
         if (target.status === 'slp') {
           extras.push(`${target.species} is asleep: its first action attempt always fails and the second attempt only succeeds 1/3 of the time — attack it now while it cannot respond`);
@@ -541,6 +618,8 @@ export function describeSwitchOption(input: {
   teamSlot?: number;
   forced?: boolean;
   weather?: string;
+  /** 对手在场的 Fake Out 威胁物种（fakeOutThreats 结果）：换入精神场地手时给“挡招”注解 */
+  fakeOutGuard?: string[];
   /** 当前槽位在场者的状态：换出收益注解（自愿换人时传入；强制换人时无意义） */
   outgoing?: {species: string; yawning?: boolean; hpPercent?: number; boosts?: Record<string, number>;
     /** 灭歌倒计时剩余回合（perishN 的 N）：换下即可重置 */
@@ -554,7 +633,17 @@ export function describeSwitchOption(input: {
     input.pokemon.item ? `, item ${input.pokemon.item}` : ''
   }${input.pokemon.ability ? `, ability ${input.pokemon.ability}` : ''}, ${input.forced ? 'forced replacement' : 'costs your action this turn'}]`;
   const outgoingNotes: string[] = [];
-  const entryEffect = ENTRY_SET_EFFECTS[toId(input.pokemon.ability ?? input.pokemon.baseAbility ?? '')];
+  const abilityId = toId(input.pokemon.ability ?? input.pokemon.baseAbility ?? '');
+  const entryEffect = ENTRY_SET_EFFECTS[abilityId];
+  // 防守型换入注解：换入即生效的挡招/覆盖机制（精神场地挡 Fake Out；Sand Stream 雨天覆盖）
+  const entryNotes: string[] = [];
+  if (entryEffect) entryNotes.push(entryEffect);
+  if (abilityId === 'psychicsurge' && input.fakeOutGuard?.length) {
+    entryNotes.push(`switching in beats Fake Out: this Pokemon's Psychic Surge sets Psychic Terrain on entry, and switch-ins resolve before any move — Fake Out (priority +3) cannot hit grounded targets under Psychic Terrain, so ${input.fakeOutGuard.join('/')}'s Fake Out is blocked this turn (it can still hit an airborne partner)`);
+  }
+  if (abilityId === 'sandstream' && ['raindance', 'rain'].includes(toId(input.weather ?? ''))) {
+    entryNotes.push(`switching in overwrites the active rain with sandstorm: the foes' rain benefits end immediately (Water moves lose their boost and Swift Swim stops working)`);
+  }
   if (input.outgoing) {
     const o = input.outgoing;
     if (o.yawning) outgoingNotes.push(`switching this slot out removes Yawn from ${o.species} before it falls asleep`);
@@ -578,7 +667,7 @@ export function describeSwitchOption(input: {
   const risks = incoming.map(i => `incoming ${i.roughPercent === null ? 'unknown' : `≈${i.roughPercent}%`} from ${i.foeSpecies} (revealed moves only${i.unknownMoves.length ? `; unknown: ${i.unknownMoves.join(', ')}` : ''})`);
   // 手动换人必须提醒代价：换入者本回合不能行动，会先吃打向该槽位的攻击（可能少血甚至被击倒）
   const manualCost = input.forced ? [] : ['the switch-in cannot act this turn and will take any attacks aimed at this slot'];
-  return [head, ...(entryEffect ? [entryEffect] : []), ...outgoingNotes, ...manualCost, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
+  return [head, ...entryNotes, ...outgoingNotes, ...manualCost, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot)].filter(Boolean).join('; ');
 }
 
@@ -749,8 +838,10 @@ export function describePreviewCandidate(input: {
   const bestMove = bestId ? input.dex.moves[bestId] : undefined;
   const bestSkinType = megaSkin && bestMove && toId(bestMove.type) === 'normal'
     ? estimatedMove(bestId, bestMove.type, entryWeather, megaSkin).type : null;
+  const possibleAbilities = possibleAbilitiesOf(input.dex, species);
   const parts = [
     `${species} [${types.join('/') || '?'}]`,
+    ...(possibleAbilities.length ? [`abilities: ${possibleAbilities.join(' / ')}`] : []),
     `moves: ${moveNames.join(', ') || '?'}`,
     input.megaCapable ? "can Mega Evolve (uses the team's only Mega slot)" : '',
     bestCount > 0 ? `best: ${bestName}${bestSkinType ? ` (${bestSkinType} post-Mega)` : ''} hits ${bestCount}/${input.analysis?.previewFoes.length ?? input.opponentPreviewSpecies.length} foes super effectively${topText}` : '',

@@ -14,7 +14,7 @@ import type {BattleState} from '../state/tracker.js';
 import {resolveKey} from './answers.js';
 import {fallbackActions, type FallbackContext} from './fallback.js';
 import {buildSwitchPlans} from './force-switch.js';
-import {applyPreviewDirectives, collectTurnDirectives} from './hard-directives.js';
+import {applyPreviewDirectives, collectTurnDirectives, enforceTyranitarMega} from './hard-directives.js';
 import {buildPreviewQuestions, fullTeamOrder, resolvePreviewOrder} from './team-preview.js';
 import {buildTurnPlans, type SlotAction, type SlotQuestionPlan} from './turn.js';
 
@@ -286,10 +286,13 @@ async function runWithJev(
   }
   const merged = mergeBySlot(fallbackActions(ctx), picks);
   const deduped = dedupeSwitchTargets(merged.actions, plans, res.answers, adjusted);
-  const actions = degradeMegaConflicts(deduped, picks, adjusted);
+  const degraded = degradeMegaConflicts(deduped, picks, adjusted);
+  // H7 硬指令：班基拉斯必须 Mega（放在双 Mega 让位之后，统一校正“模型放弃”与“被降级让位”两条路径）
+  const enforced = enforceTyranitarMega({dex: ctx.dex, request: ctx.request, plans, actions: degraded});
+  adjusted.push(...enforced.notes);
   return {
     ...trace,
-    actions,
+    actions: enforced.actions,
     adjusted,
     replacedCount: merged.replacedCount,
     answers: res.answers,

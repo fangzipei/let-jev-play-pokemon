@@ -223,9 +223,10 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   }
   if (item === 'choicescarf') notes.push('Choice Scarf increases speed x1.5 with a move lock; opponent actual speeds remain unknown');
   if (moves.has('trick')) {
+    const megaCaveat = 'Mega Stones cannot be swapped, so check the target cannot be holding its Mega Stone (a Mega-capable species whose item is not revealed as something else) before choosing Trick — the swap would fail outright';
     notes.push(item === 'choicescarf'
-      ? "Trick can pass this Choice Scarf to an opponent: the target is locked into one move for the speed boost and the held items swap; handing the Scarf away also frees this Pokemon from its own single-move lock, so it can pick any move again; prefer a target that relies on options (slow, defensive or support pieces) since a fast attacker may gain more from the x1.5 Speed than it loses to the lock"
-      : 'Trick swaps held items with the target; when a Choice item changes hands, its single-move lock goes with it');
+      ? `Trick can pass this Choice Scarf to an opponent: the target is locked into one move for the speed boost and the held items swap; handing the Scarf away also frees this Pokemon from its own single-move lock, so it can pick any move again; prefer a target that relies on options (slow, defensive or support pieces) since a fast attacker may gain more from the x1.5 Speed than it loses to the lock; ${megaCaveat}`
+      : `Trick swaps held items with the target; when a Choice item changes hands, its single-move lock goes with it; ${megaCaveat}`);
   }
   if (moves.has('trickroom')) notes.push('Trick Room can support slower teammates by reversing speed order within each priority bracket; faster teammates may be disadvantaged');
   if (moves.has('coil') && moves.has('hypnosis')) {

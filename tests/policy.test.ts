@@ -646,4 +646,80 @@ describe('硬指令接线', () => {
     expect(outcome?.adjusted.some(a => a.startsWith('hard:terrain'))).toBe(true);
     expect(outcome?.fallback).toBe(false);
   });
+
+  const TYRANITAR_LINES = [
+    '|poke|p1|Tyranitar, L50, M|',
+    '|poke|p1|Salamence, L50, M|',
+    '|poke|p2|Sneasler, L50, F|',
+    '|poke|p2|Metagross, L50|',
+    '|teamsize|p1|4',
+    '|teamsize|p2|4',
+    '|start',
+    '|switch|p1a: Tyranitar|Tyranitar, L50, M|175/175',
+    '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+    '|switch|p2a: Sneasler|Sneasler, L50, F|160/160',
+    '|switch|p2b: Metagross|Metagross, L50|200/200',
+    '|turn|2',
+  ];
+
+  /** 持 Tyranitarite 的班基拉斯（槽位 1）+ Salamence（槽位 2）；slot2CanMega 时暴飞龙也可 Mega */
+  function mkTyranitarMegaRequest(slot2CanMega = false): BattleRequest {
+    return {
+      active: [
+        {moves: [
+          {move: 'Rock Slide', id: 'rockslide', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+          {move: 'Knock Off', id: 'knockoff', pp: 20, maxpp: 20, target: 'normal'},
+          {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+          {move: 'Low Kick', id: 'lowkick', pp: 20, maxpp: 20, target: 'normal'},
+        ], canMegaEvo: true},
+        {moves: [
+          {move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+          {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+        ], canMegaEvo: slot2CanMega},
+      ],
+      side: {
+        name: 'JevBot1234',
+        id: 'p1',
+        pokemon: [
+          {ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: true, stats: {atk: 185, def: 130, spa: 110, spd: 130, spe: 82}, item: 'tyranitarite', ability: 'sandstream', moves: ['rockslide', 'knockoff', 'protect', 'lowkick']},
+          {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: {atk: 135, def: 100, spa: 110, spd: 100, spe: 100}, item: 'salamencite', ability: 'intimidate', moves: ['hypervoice', 'protect']},
+          {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', moves: ['trick']},
+          {ident: 'p1: Golisopod', details: 'Golisopod, L50, M', condition: '150/150', active: false, moves: ['ironhead']},
+        ],
+      },
+      rqid: 7,
+    };
+  }
+
+  it('turn：班基拉斯选普通招式时强制声明 Mega', async () => {
+    const ctx = mkCtx({
+      request: mkTyranitarMegaRequest(),
+      jev: mkJev({
+        action_slot_1: {type: 'choice', choice: 'move_1', confidence: 0.8},
+        action_slot_2: {type: 'choice', choice: 'move_1', confidence: 0.6},
+      }),
+    });
+    ctx.dex = hardDex();
+    ctx.tracker = mkTrackerWithLines(TYRANITAR_LINES);
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose move 1 mega, move 1|7');
+    expect(outcome?.adjusted.some(a => a.startsWith('hard:mega'))).toBe(true);
+    expect(outcome?.fallback).toBe(false);
+  });
+
+  it('turn：班基拉斯与暴飞龙同时可 Mega 时班基拉斯优先，踢倒照常锁敌', async () => {
+    const ctx = mkCtx({
+      request: mkTyranitarMegaRequest(true),
+      jev: mkJev({
+        action_slot_1: {type: 'choice', choice: 'move_4_foe_a', confidence: 0.75},
+        action_slot_2: {type: 'choice', choice: 'move_1_mega', confidence: 0.95},
+      }),
+    });
+    ctx.dex = hardDex();
+    ctx.tracker = mkTrackerWithLines(TYRANITAR_LINES);
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose move 4 +1 mega, move 1|7');
+    expect(outcome?.adjusted.some(a => a.startsWith('hard:mega'))).toBe(true);
+    expect(outcome?.fallback).toBe(false);
+  });
 });

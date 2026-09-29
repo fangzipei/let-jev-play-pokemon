@@ -6,6 +6,7 @@ import {speedControlText} from '../state/speed-control.js';
 import type {BattleTracker} from '../state/tracker.js';
 import type {SlotOption, SlotQuestionPlan} from './turn.js';
 import {BATTLE_GOAL} from './battle-goal.js';
+import {sceneBriefing} from './scene.js';
 
 const SWITCH_INTRO = BATTLE_GOAL +
   'The server requires a replacement for this slot, for example after fainting or a forced pivot. Pick exactly ONE bench Pokemon to send in. ' +
@@ -17,6 +18,7 @@ export function buildSwitchPlans(input: {dex: DexData; request: BattleRequest; t
   const foes = opponentActives(input.dex, input.tracker.state).filter(a => a.status !== 'fnt' && a.hpPercent > 0);
   const bench = benchEntries(input.request);
   const speedText = speedControlText(input.tracker.state, input.tracker.state.ourSideId ?? input.request.side.id);
+  const scene = sceneBriefing({dex: input.dex, request: input.request, state: input.tracker.state});
   const plans: SlotQuestionPlan[] = [];
   for (let i = 0; i < forceSwitch.length; i++) {
     if (!forceSwitch[i]) continue;
@@ -38,7 +40,7 @@ export function buildSwitchPlans(input: {dex: DexData; request: BattleRequest; t
       options,
       question: {
         type: 'choice',
-        instructions: `${SWITCH_INTRO}${speedText ? ` ${speedText}` : ''} This is slot ${slot}.`,
+        instructions: `${SWITCH_INTRO}${speedText ? ` ${speedText}` : ''}${scene ? ` ${scene}` : ''} This is slot ${slot}.`,
         criteria,
       },
     });

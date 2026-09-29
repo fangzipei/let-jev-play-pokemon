@@ -146,4 +146,13 @@ describe('dex schema', () => {
     expect(normalizeSpecies({bad: {name: 'Bad', types: 'Grass', baseStats: stats}, incomplete: {...bulbasaur, baseStats: {spe: 10}}, inf: {...bulbasaur, baseStats: {...stats, spe: Infinity}}})).toEqual({});
     expect(normalizeMoves({bad: {...tackle, basePower: NaN}, badtype: {...tackle, type: 'Fake'}, badcategory: {...tackle, category: 'Fake'}, array: []})).toEqual({});
   });
+
+  it('保留有效体重以支持踢倒威力，非法体重丢弃', () => {
+    const result = normalizeSpecies({
+      tyranitar: {...bulbasaur, name: 'Tyranitar', weightkg: 202},
+      badweight: {...bulbasaur, name: 'Bad Weight', weightkg: -1},
+    });
+    expect(result.tyranitar?.weightkg).toBe(202);
+    expect(result.badweight?.weightkg).toBeUndefined();
+  });
 });

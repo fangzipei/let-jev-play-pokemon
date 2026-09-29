@@ -93,6 +93,20 @@ describe('fetchDataFile', () => {
     expect(await fetchDataFile('moves', {cacheDir: tempDir(), fetchImpl})).toEqual({...moves, partial: {type: 'Water'}});
   });
 
+  it('pokedex 表保留有效体重（踢倒威力数据源），非法值丢弃', async () => {
+    const stats = {hp: 100, atk: 134, def: 110, spa: 95, spd: 100, spe: 61};
+    const data = {
+      tyranitar: {types: ['Rock', 'Dark'], baseStats: stats, abilities: {0: 'Sand Stream'}, weightkg: 202},
+      negative: {types: ['Rock'], baseStats: stats, weightkg: -5},
+      textual: {types: ['Rock'], baseStats: stats, weightkg: '202'},
+    };
+    const fetchImpl = vi.fn(async () => new Response(`exports.BattlePokedex = ${JSON.stringify(data)};`)) as typeof fetch;
+    const filtered = await fetchDataFile('pokedex', {cacheDir: tempDir(), fetchImpl});
+    expect((filtered.tyranitar as any).weightkg).toBe(202);
+    expect((filtered.negative as any).weightkg).toBeUndefined();
+    expect((filtered.textual as any).weightkg).toBeUndefined();
+  });
+
   it('属性表保留官方编码，由 calc 负责转换', async () => {
     const raw = {fire: {damageTaken: {Water: 1, Grass: 2, brn: 3}}, invalid: null};
     const fetchImpl = vi.fn(async () => new Response(`exports.BattleTypeChart = ${JSON.stringify(raw)};`)) as typeof fetch;

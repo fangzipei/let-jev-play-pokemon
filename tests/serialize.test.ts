@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {
-  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, opponentActives, isMegaCapable, mainAttackOf,
+  buildStatePayload, describeMoveOption, describePreviewCandidate, describeSwitchOption, fakeOutThreats, opponentActives, isMegaCapable, mainAttackOf,
 } from '../src/state/serialize.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 import {buildAnalysisContext} from '../src/state/analysis.js';
@@ -231,6 +231,36 @@ describe('describeMoveOption', () => {
     expect(text).toContain('≈98% damage');
     expect(describeMoveOption(base)).toContain('Hyper Voice [Normal/Special/90BP/PP 10/10]');
   });
+
+  it('踢倒按目标体重换算威力，对 202kg 班基拉斯显示 120BP 与可秒杀提示', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'lowkick', moveName: 'Low Kick', pp: 20, maxpp: 20,
+      attackerTypes: ['Rock', 'Dark'], attackerStats: {atk: 185},
+      target: {label: 'Foe A', species: 'Tyranitar', hpPercent: 100},
+    });
+    expect(text).toContain('Low Kick [Fighting/Physical/120BP/PP 20/20]');
+    expect(text).toMatch(/≈150% damage \(4x\)/);
+    expect(text).toMatch(/knock out/i);
+  });
+
+  it('伤害不足 100% 时不出现秒杀提示', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+    });
+    expect(text).toMatch(/≈\d+% damage/);
+    expect(text).not.toMatch(/knock ?out/i);
+  });
+
+  it('目标体重数据缺失时踢倒不做威力猜测', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'lowkick', moveName: 'Low Kick', pp: 20, maxpp: 20,
+      attackerTypes: ['Rock', 'Dark'], attackerStats: {atk: 185},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+    });
+    expect(text).toContain('damage unknown');
+  });
 });
 
 describe('describeMoveOption 战术注解', () => {
@@ -303,6 +333,27 @@ describe('describeMoveOption 战术注解', () => {
     expect(text).toMatch(/prefer a target/);
     const nonChoice = describeMoveOption({...base, attackerItem: 'Leftovers'});
     expect(nonChoice).not.toMatch(/locked into repeating/);
+  });
+  it('Trick 目标已 Mega 或可能持 Mega 石时警告交换失败', () => {
+    const base = {dex, moveId: 'trick', moveName: 'Trick', pp: 10, maxpp: 10, attackerTypes: ['Psychic'], attackerItem: 'Choice Scarf'};
+    const alreadyMega = describeMoveOption({...base, target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100, mega: true, item: 'Golisopite'}});
+    expect(alreadyMega).toMatch(/Trick will fail/);
+    expect(alreadyMega).toMatch(/Mega Stone/);
+    const revealedStone = describeMoveOption({...base, target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100, item: 'Golisopite'}});
+    expect(revealedStone).toMatch(/Trick will fail/);
+    const suspect = describeMoveOption({...base, target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100}});
+    expect(suspect).toMatch(/may fail/);
+    const safeItem = describeMoveOption({...base, target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100, item: 'Leftovers'}});
+    expect(safeItem).not.toMatch(/Trick will fail|may fail/);
+    const noMegaForm = describeMoveOption({...base, target: {label: 'Foe A', species: 'Metagross', hpPercent: 100}});
+    expect(noMegaForm).not.toMatch(/Mega Stone/);
+  });
+  it('Trick 的 Mega 石警告不依赖使用者是否持讲究道具', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'trick', moveName: 'Trick', pp: 10, maxpp: 10, attackerTypes: ['Psychic'],
+      target: {label: 'Foe A', species: 'Golisopod', hpPercent: 100},
+    });
+    expect(text).toMatch(/may fail/);
   });
   it('晴天下水系伤害招式标注减半', () => {
     const base = {dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
@@ -1201,5 +1252,85 @@ describe('控速下的出手顺序结论', () => {
     expect(label).not.toContain('Sneasler (neutral full-investment');
     expect(label).not.toContain('would act before Sneasler');
     expect(label).not.toContain('Sneasler base speed');
+  });
+});
+
+describe('preview 候选特性全量展示', () => {
+  it('describePreviewCandidate 列出 pokedex 的全部候选特性（0/1/H/S 键序、去重）', () => {
+    const request = mkRequest();
+    const text = describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[2], // Tyranitar：Sand Stream / Unnerve
+      opponentPreviewSpecies: ['Victreebel'], megaCapable: false,
+    });
+    expect(text).toContain('abilities: Sand Stream / Unnerve');
+    expect(describePreviewCandidate({
+      dex, pokemon: request.side.pokemon[0], // Golisopod：单特性
+      opponentPreviewSpecies: ['Victreebel'], megaCapable: true,
+    })).toContain('abilities: Emergency Exit');
+    const dupDex = mkDex();
+    dupDex.species.dupe = {name: 'Dupe', types: ['Normal'], baseStats: {hp: 80, atk: 80, def: 80, spa: 80, spd: 80, spe: 80}, abilities: {0: 'Run Away', H: 'Run Away', 1: 'Guts'}};
+    const dup = describePreviewCandidate({
+      dex: dupDex, pokemon: {...request.side.pokemon[2], details: 'Dupe, L50, M', moves: []},
+      opponentPreviewSpecies: ['Victreebel'], megaCapable: false,
+    });
+    expect(dup).toContain('abilities: Run Away / Guts');
+  });
+  it('payload 的我方、对手与 unseen_from_preview 条目都带 possible_abilities', () => {
+    const request = mkRequest();
+    const state = mkTracker().state;
+    const analysis = buildAnalysisContext({dex, request, state, level: 1});
+    const payload = buildStatePayload({dex, request, state, analysis}) as any;
+    expect(payload.sides.ours.preview[2].possible_abilities).toEqual(['Sand Stream', 'Unnerve']);
+    expect(payload.sides.ours.active[0].possible_abilities).toEqual(['Emergency Exit']);
+    const opponent = payload.sides.opponent;
+    expect(opponent.preview.find((p: any) => p.species === 'Victreebel').possible_abilities).toEqual(['Chlorophyll']);
+    expect(opponent.unseen_from_preview.find((p: any) => p.species === 'Sneasler').possible_abilities).toEqual(['Unburden']);
+  });
+});
+
+describe('场上事实与换入防守注解', () => {
+  it('fakeOutThreats 只报刚上场窗口内、已揭示 Fake Out 的在场对手', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2a: Victreebel|Fake Out|p1a: Golisopod');
+    expect(fakeOutThreats(tracker.state)).toEqual(['Victreebel']);
+  });
+
+  it('精神场地已激活或窗口过期时不再报 Fake Out 威胁', () => {
+    const field = mkTracker();
+    field.handleLine('|move|p2a: Victreebel|Fake Out|p1a: Golisopod');
+    field.handleLine('|-fieldstart|move: Psychic Terrain|[from]ability: Psychic Surge');
+    expect(fakeOutThreats(field.state)).toEqual([]);
+
+    const expired = mkTracker();
+    expired.handleLine('|move|p2a: Victreebel|Fake Out|p1a: Golisopod');
+    expired.handleLine('|turn|2');
+    expired.handleLine('|turn|3');
+    expect(fakeOutThreats(expired.state)).toEqual([]);
+  });
+
+  it('换入精神场地手时描述注明换人先于招式结算、Fake Out 被场地挡住', () => {
+    const state = mkTracker().state;
+    const indeedee: any = {
+      ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false,
+      stats: {atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, ability: 'psychicsurge', moves: ['trick'],
+    };
+    const text = describeSwitchOption({dex, pokemon: indeedee, opponentActives: opponentActives(dex, state), fakeOutGuard: ['Sneasler']});
+    expect(text).toContain('Psychic Terrain');
+    expect(text).toContain('Fake Out');
+    expect(text).toContain('Sneasler');
+    const plain = describeSwitchOption({dex, pokemon: indeedee, opponentActives: opponentActives(dex, state)});
+    expect(plain).not.toContain('Fake Out');
+  });
+
+  it('雨天换入班基拉斯时描述注明沙暴覆盖雨天并取消对手雨天收益', () => {
+    const tyranitar: any = {
+      ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: false,
+      stats: {atk: 185, def: 130, spa: 110, spd: 130, spe: 82}, ability: 'sandstream', moves: ['rockslide'],
+    };
+    const rain = describeSwitchOption({dex, pokemon: tyranitar, opponentActives: [], weather: 'RainDance'});
+    expect(rain).toMatch(/overwrites the active rain/i);
+    expect(rain).toMatch(/Swift Swim/i);
+    const sunny = describeSwitchOption({dex, pokemon: tyranitar, opponentActives: [], weather: 'SunnyDay'});
+    expect(sunny).not.toMatch(/overwrites the active rain/i);
   });
 });

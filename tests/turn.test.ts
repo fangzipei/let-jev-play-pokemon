@@ -63,6 +63,25 @@ describe('三类构造器复用分析', () => {
       .toContain('post-Mega this move becomes Flying-type and is super effective against Grass, Fighting and Bug foes');
     expect(options.find(o => o.key === 'move_2')?.label).not.toContain('post-Mega this move becomes');
   });
+  it('踢倒等变威力攻击招同样获得 mega 变体，状态招不获得', () => {
+    const request = mkRequest();
+    request.side.pokemon[0] = {
+      ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: true,
+      stats: {atk: 185, def: 130, spa: 110, spd: 130, spe: 82},
+      moves: ['rockslide', 'protect', 'lowkick'],
+      item: 'tyranitarite', ability: 'sandstream',
+    };
+    request.active![0] = {moves: [
+      {move: 'Rock Slide', id: 'rockslide', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+      {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      {move: 'Low Kick', id: 'lowkick', pp: 20, maxpp: 20, target: 'normal'},
+    ], canMegaEvo: true};
+    const options = buildTurnPlans({dex, request, tracker: mkTracker()})[0].options;
+    expect(options.some(o => o.key === 'move_1_mega')).toBe(true);
+    expect(options.some(o => o.key === 'move_3_foe_a_mega')).toBe(true);
+    expect(options.some(o => o.key === 'move_3_foe_b_mega')).toBe(true);
+    expect(options.some(o => o.key === 'move_2_mega')).toBe(false);
+  });
   it('preview 四题同批独立描述组合意图，不声称看到前题答案且保持 keys', () => {
     const request = mkRequest({teamPreview: true});
     const result = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard']});
@@ -531,5 +550,37 @@ describe('回合结果回顾与广域防守警示', () => {
       .not.toContain('Wide Guard');
     expect(buildTurnPlans({dex, request, tracker: l1})[1].options.find(o => o.key === 'move_2')?.label)
       .not.toContain('Wide Guard');
+  });
+});
+
+describe('场上简报注入', () => {
+  it('回合提问注入速度线、对手已暴露道具与特性的简报', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    tracker.handleLine('|-item|p2b: Charizard|Choice Scarf');
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(plans[0].question.instructions).toContain('Choice Scarf');
+    expect(plans[0].question.instructions).toMatch(/base stats only/);
+  });
+
+  it('强制换人提问同样注入场上简报', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    tracker.handleLine('|-item|p2b: Charizard|Choice Scarf');
+    const plans = buildSwitchPlans({dex, request: {...request, forceSwitch: [true, true]}, tracker});
+    expect(plans[0].question.instructions).toContain('Choice Scarf');
+  });
+
+  it('对手 Fake Out 窗口内，换入精神场地手的描述包含挡招注解', () => {
+    const localDex = mkDex();
+    localDex.species.indeedee = {name: 'Indeedee', types: ['Psychic', 'Normal'], baseStats: {hp: 60, atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, abilities: {0: 'Psychic Surge'}};
+    const request = mkRequest();
+    request.side.pokemon[2] = {...request.side.pokemon[2], ident: 'p1: Indeedee', details: 'Indeedee, L50, M', ability: 'psychicsurge', moves: ['trick']};
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2a: Victreebel|Fake Out|p1a: Golisopod');
+    const plans = buildTurnPlans({dex: localDex, request, tracker});
+    const option = plans[0].options.find(o => o.key === 'switch_3');
+    expect(option?.label).toContain('Fake Out');
+    expect(option?.label).toContain('Psychic Terrain');
   });
 });

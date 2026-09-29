@@ -9,6 +9,8 @@ export interface SpeciesInfo {
   abilities: Record<string, string>;
   baseSpecies?: string;
   requiredItem?: string;
+  /** 体重（kg）：踢倒等按目标体重换算威力的招式数据源；数据缺失时不猜测 */
+  weightkg?: number;
 }
 
 export interface MoveInfo {
@@ -67,6 +69,7 @@ export function normalizeSpecies(raw: Record<string, unknown>): Record<string, S
       abilities: {...v.abilities},
       ...(v.baseSpecies ? {baseSpecies: v.baseSpecies} : {}),
       ...(v.requiredItem ? {requiredItem: v.requiredItem} : {}),
+      ...(v.weightkg ? {weightkg: v.weightkg} : {}),
     };
   }
   return out;

@@ -7,10 +7,11 @@ import {
   activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
   type BattleRequest,
 } from '../state/request.js';
-import {describeMoveOption, describeSwitchOption, mainAttackOf, opponentActives, PROTECT_LIKE_MOVES, type OpponentActive} from '../state/serialize.js';
+import {describeMoveOption, describeSwitchOption, fakeOutThreats, mainAttackOf, opponentActives, PROTECT_LIKE_MOVES, type OpponentActive} from '../state/serialize.js';
 import {speedControlOf, speedControlText} from '../state/speed-control.js';
 import type {BattleTracker, PokemonState} from '../state/tracker.js';
 import {BATTLE_GOAL} from './battle-goal.js';
+import {sceneBriefing} from './scene.js';
 
 export interface SlotMoveAction {
   kind: 'move';
@@ -199,7 +200,8 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     // 上一回合用过保护类招式 → 本回合不提供该选项（连续保护不可靠，避免连续守住）
     if (protectUsedLastTurn && PROTECT_LIKE_MOVES.has(toId(mv.id))) continue;
     const moveInfo = dex.moves[toId(mv.id)];
-    const damaging = (moveInfo?.basePower ?? 0) > 0;
+    // 非状态招均可声明 Mega：踢倒等 basePower=0 的变威力攻击招同样生成 mega 变体；缺招式数据时不生成
+    const damaging = moveInfo ? moveInfo.category !== 'Status' : false;
     const hitsBoth = mv.target === 'allAdjacentFoes' || mv.target === 'allAdjacent';
     const canMega = reqActive.canMegaEvo === true && damaging;
     for (const spec of targetSpecsFor(mv.target, slot, foes.length)) {
@@ -215,7 +217,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         attackerStats: me.stats,
         attackerBoosts: trackedSelf?.boosts,
         attackerAbility: me.ability ?? me.baseAbility,
-        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident, status: foe.status, boosts: foe.boosts} : undefined,
+        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident, status: foe.status, boosts: foe.boosts, mega: foe.mega, item: foe.item, consumedItem: foe.consumedItem} : undefined,
         targets: hitsBoth && foes.length ? foes.map(f => ({label: f.label, species: f.species, hpPercent: f.hpPercent, ident: f.ident, status: f.status, boosts: f.boosts})) : undefined,
         analysis: input.analysis,
         attackerSlot: teamSlotOf(request, me),
@@ -257,6 +259,8 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
   }
 
   if (reqActive.trapped !== true) {
+    // 对手已知 Fake Out 窗口（换入精神场地手时给挡招注解）：威胁来自对手侧 tracker 事实
+    const fakeOutGuard = fakeOutThreats(tracker.state);
     // 换出收益（给 jev 比较换人时的正向理由）：Yawn/灭歌解除、低血保存、负面阶级清零
     const outgoing = {
       species,
@@ -270,7 +274,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
       const teamIndex = teamSlotOf(request, bench);
       options.push({
         key: `switch_${teamIndex}`,
-        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, weather, outgoing}),
+        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, weather, outgoing, fakeOutGuard}),
         action: {kind: 'switch', slot, teamIndex},
       });
     }
@@ -289,6 +293,8 @@ export function buildTurnPlans(input: TurnInput): SlotQuestionPlan[] {
     .filter(x => (x.tracked?.volatiles ?? []).some(v => toId(v) === 'yawn'))
     .map(x => `Yawn on our ${x.species}: it falls asleep at the end of the next resolved turn unless it switches out; switching out removes Yawn and the replacement is unaffected.`)
     .join(' ');
+  // 场上简报：速度线与对手已暴露情报（不重复 speedControlText 已覆盖的天气/空间/顺风）
+  const scene = sceneBriefing({dex: input.dex, request: input.request, state: input.tracker.state});
   const plans: SlotQuestionPlan[] = [];
   const activeCount = input.request.active?.length ?? 0;
   for (let i = 0; i < activeCount; i++) {
@@ -303,7 +309,7 @@ export function buildTurnPlans(input: TurnInput): SlotQuestionPlan[] {
       options,
       question: {
         type: 'choice',
-        instructions: `${TURN_INTRO} It is turn ${input.tracker.state.turn}.${speedText ? ` ${speedText}` : ''}${yawnText ? ` ${yawnText}` : ''} Choose the action for slot ${slot}.`,
+        instructions: `${TURN_INTRO} It is turn ${input.tracker.state.turn}.${speedText ? ` ${speedText}` : ''}${yawnText ? ` ${yawnText}` : ''}${scene ? ` ${scene}` : ''} Choose the action for slot ${slot}.`,
         criteria,
       },
     });

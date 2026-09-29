@@ -1,9 +1,9 @@
 import {beforeEach, describe, expect, it} from 'vitest';
 import type {DexData} from '../src/dex/index.js';
-import {applyPreviewDirectives, collectTurnDirectives, resetHardDirectives} from '../src/decide/hard-directives.js';
-import {buildTurnPlans} from '../src/decide/turn.js';
+import {applyPreviewDirectives, collectTurnDirectives, enforceTyranitarMega, resetHardDirectives} from '../src/decide/hard-directives.js';
+import {buildTurnPlans, type SlotOption, type SlotQuestionPlan} from '../src/decide/turn.js';
 import type {BattleRequest} from '../src/state/request.js';
-import {mkDex, mkTrackerWithLines} from './helpers.js';
+import {mkDex, mkRequest, mkTrackerWithLines} from './helpers.js';
 
 /** 在 mkDex 上补充硬指令相关物种（场地手 Indeedee、慢速目标 Torkoal、Milotic） */
 function mkDirectiveDex(): DexData {
@@ -80,6 +80,28 @@ const TRICK_FOES = [
   '|switch|p2b: Torkoal|Torkoal, L50, M|160/160',
   '|turn|2',
 ];
+
+/** H2 Mega 石风险用例：p2 首发为给定两只，extraLines 插在 turn 之前 */
+function mkMegaRiskFoes(p2a: string, p2b: string, extraLines: string[] = []): string[] {
+  return [
+    '|poke|p1|Indeedee, L50, M|',
+    '|poke|p1|Milotic, L50, F|',
+    '|poke|p1|Salamence, L50, M|',
+    '|poke|p1|Golisopod, L50, M|',
+    `|poke|p2|${p2a}, L50, M|`,
+    `|poke|p2|${p2b}, L50, F|`,
+    '|teampreview|4',
+    '|teamsize|p1|4',
+    '|teamsize|p2|4',
+    '|start',
+    '|switch|p1a: Indeedee|Indeedee, L50, M|145/145',
+    '|switch|p1b: Milotic|Milotic, L50, F|175/175',
+    `|switch|p2a: ${p2a}|${p2a}, L50, M|150/150`,
+    `|switch|p2b: ${p2b}|${p2b}, L50, F|160/160`,
+    ...extraLines,
+    '|turn|2',
+  ];
+}
 
 /** Coil 强化在身的 Milotic 在场，Hypnosis 可选 */
 function mkHypnosisRequest(): BattleRequest {
@@ -311,6 +333,64 @@ describe('硬指令 H2：给慢速对手套讲究围巾', () => {
   });
 });
 
+describe('硬指令 H2：不把围巾 Trick 给可能持 Mega 石的目标', () => {
+  it('有 Mega 形态且道具未揭示的慢速目标被跳过，改选次慢的安全目标', () => {
+    const dex = mkDirectiveDex();
+    const request = mkTrickRequest();
+    const tracker = mkTrackerWithLines(mkMegaRiskFoes('Golisopod', 'Kingambit'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const trick = collectTurnDirectives({dex, request, tracker, plans}).find(d => d.slot === 1);
+    expect(trick?.key).toBe('move_1_foe_b');
+    expect(trick?.note).toContain('Kingambit');
+    expect(trick?.note).toContain('(skipped for Mega-stone risk: Golisopod)');
+  });
+
+  it('已 Mega 的目标（Mega 石仍在身上）同样被跳过', () => {
+    const dex = mkDirectiveDex();
+    const request = mkTrickRequest();
+    const tracker = mkTrackerWithLines(mkMegaRiskFoes('Golisopod', 'Kingambit', [
+      '|-mega|p2a: Golisopod|Golisopod-Mega|Golisopite',
+    ]));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const trick = collectTurnDirectives({dex, request, tracker, plans}).find(d => d.slot === 1);
+    expect(trick?.key).toBe('move_1_foe_b');
+    expect(trick?.note).toContain('(skipped for Mega-stone risk: Golisopod)');
+  });
+
+  it('道具已揭示为普通道具的 Mega 形态物种不被跳过', () => {
+    const dex = mkDirectiveDex();
+    const request = mkTrickRequest();
+    const tracker = mkTrackerWithLines(mkMegaRiskFoes('Golisopod', 'Kingambit', ['|-item|p2a: Golisopod|Leftovers']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const trick = collectTurnDirectives({dex, request, tracker, plans}).find(d => d.slot === 1);
+    expect(trick?.key).toBe('move_1_foe_a');
+    expect(trick?.note).toContain('Golisopod');
+    expect(trick?.note).not.toContain('skipped');
+  });
+
+  it('慢速候选全部有 Mega 石风险时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkTrickRequest();
+    const tracker = mkTrackerWithLines([
+      '|poke|p1|Indeedee, L50, M|',
+      '|poke|p1|Milotic, L50, F|',
+      '|poke|p1|Salamence, L50, M|',
+      '|poke|p1|Golisopod, L50, M|',
+      '|poke|p2|Golisopod, L50, M|',
+      '|teampreview|4',
+      '|teamsize|p1|4',
+      '|teamsize|p2|4',
+      '|start',
+      '|switch|p1a: Indeedee|Indeedee, L50, M|145/145',
+      '|switch|p1b: Milotic|Milotic, L50, F|175/175',
+      '|switch|p2a: Golisopod|Golisopod, L50, M|150/150',
+      '|turn|2',
+    ]);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+});
+
 describe('硬指令 H3：强化后催眠', () => {
   it('命中强化在身且有未睡眠目标时强制催眠最快者', () => {
     const dex = mkDirectiveDex();
@@ -472,5 +552,354 @@ describe('硬指令 H6：对手天气时把班基拉斯补入前四位', () => {
     const request = mkPreviewRequest(['Indeedee', 'Milotic', 'Salamence', 'Golisopod', 'Chandelure', 'Excadrill']);
     const result = applyPreviewDirectives({dex, request, order: [1, 2, 3, 4], opponentPreviewSpecies: ['Torkoal']});
     expect(result.order).toEqual([1, 2, 3, 4]);
+  });
+});
+
+// ---------- H7 单测 fixture ----------
+
+/** 持 Tyranitarite 的班基拉斯（槽位 1）+ Salamence 同伴（槽位 2）；slot2CanMega 时暴飞龙也可 Mega */
+function mkTyranitarMegaRequest(slot2CanMega = false): BattleRequest {
+  return {
+    active: [
+      {moves: [
+        {move: 'Rock Slide', id: 'rockslide', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        {move: 'Knock Off', id: 'knockoff', pp: 20, maxpp: 20, target: 'normal'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+        {move: 'Low Kick', id: 'lowkick', pp: 20, maxpp: 20, target: 'normal'},
+      ], canMegaEvo: true},
+      {moves: [
+        {move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      ], canMegaEvo: slot2CanMega},
+    ],
+    side: {
+      name: 'JevBot1234',
+      id: 'p1',
+      pokemon: [
+        {ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: true, stats: {atk: 185, def: 130, spa: 110, spd: 130, spe: 82}, item: 'tyranitarite', ability: 'sandstream', moves: ['rockslide', 'knockoff', 'protect', 'lowkick']},
+        {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: SALAMENCE_STATS, item: 'salamencite', ability: 'intimidate', moves: ['hypervoice', 'protect']},
+        {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', moves: ['trick']},
+        {ident: 'p1: Golisopod', details: 'Golisopod, L50, M', condition: '150/150', active: false, moves: ['ironhead']},
+      ],
+    },
+    rqid: 15,
+  };
+}
+
+/** 与 key 同步的 move 选项（key 带 _mega 后缀时 action.mega=true），模拟 buildTurnPlans 生成的两类选项 */
+function mkMoveOption(slot: 1 | 2, key: string, moveIndex: number, target?: string): SlotOption {
+  return {
+    key, label: key,
+    action: {kind: 'move', slot, moveIndex, ...(target ? {target} : {}), ...(key.endsWith('_mega') ? {mega: true} : {})},
+  };
+}
+
+/** 班基拉斯招式选项：Rock Slide/Knock Off/Protect/Low Kick；Protect 为 Status 无 mega 变体 */
+function tyranitarOptions(slot: 1 | 2 = 1): SlotOption[] {
+  return [
+    mkMoveOption(slot, 'move_1', 1), mkMoveOption(slot, 'move_1_mega', 1),
+    mkMoveOption(slot, 'move_2_foe_a', 2, '+1'), mkMoveOption(slot, 'move_2_foe_a_mega', 2, '+1'),
+    mkMoveOption(slot, 'move_2_foe_b', 2, '+2'), mkMoveOption(slot, 'move_2_foe_b_mega', 2, '+2'),
+    mkMoveOption(slot, 'move_3', 3),
+    mkMoveOption(slot, 'move_4_foe_a', 4, '+1'), mkMoveOption(slot, 'move_4_foe_a_mega', 4, '+1'),
+    mkMoveOption(slot, 'move_4_foe_b', 4, '+2'), mkMoveOption(slot, 'move_4_foe_b_mega', 4, '+2'),
+  ];
+}
+
+/** 暴飞龙招式选项（Hyper Voice 可 Mega，Protect 无变体） */
+function salamenceOptions(slot: 1 | 2 = 2): SlotOption[] {
+  return [
+    mkMoveOption(slot, 'move_1', 1), mkMoveOption(slot, 'move_1_mega', 1),
+    mkMoveOption(slot, 'move_2', 2),
+  ];
+}
+
+/** H7 单测用的槽位计划（只驱动硬指令，不依赖 turn.ts 的选项生成） */
+function mkPlan(slot: 1 | 2, options: SlotOption[]): SlotQuestionPlan {
+  return {slot, questionName: `action_slot_${slot}`, options, question: {type: 'choice', instructions: '', criteria: {}}};
+}
+
+describe('硬指令 H7：班基拉斯必须 Mega', () => {
+  it('模型给班基拉斯选普通招式时升级为 Mega', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkTyranitarMegaRequest(),
+      plans: [mkPlan(1, tyranitarOptions()), mkPlan(2, salamenceOptions())],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1}, {kind: 'move', slot: 2, moveIndex: 1}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1, mega: true},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(result.notes.some(n => n.startsWith('hard:mega'))).toBe(true);
+  });
+
+  it('踢倒（变威力招式）同样升级且保留目标', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkTyranitarMegaRequest(),
+      plans: [mkPlan(1, tyranitarOptions()), mkPlan(2, salamenceOptions())],
+      actions: [{kind: 'move', slot: 1, moveIndex: 4, target: '+1'}, {kind: 'move', slot: 2, moveIndex: 2}],
+    });
+    expect(result.actions[0]).toEqual({kind: 'move', slot: 1, moveIndex: 4, target: '+1', mega: true});
+  });
+
+  it('班基拉斯已 Mega 时其他槽位的 Mega 让位', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkTyranitarMegaRequest(true),
+      plans: [mkPlan(1, tyranitarOptions()), mkPlan(2, salamenceOptions())],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1, mega: true}, {kind: 'move', slot: 2, moveIndex: 1, mega: true}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1, mega: true},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(result.notes.some(n => n.startsWith('hard:mega'))).toBe(true);
+  });
+
+  it('其他槽位 Mega 而班基拉斯未 Mega 时：班基拉斯升级、其他让位', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkTyranitarMegaRequest(true),
+      plans: [mkPlan(1, tyranitarOptions()), mkPlan(2, salamenceOptions())],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1}, {kind: 'move', slot: 2, moveIndex: 1, mega: true}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1, mega: true},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+  });
+
+  it('班基拉斯选保护（无 Mega 变体）时不升级、其他槽位保留 Mega', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkTyranitarMegaRequest(true),
+      plans: [mkPlan(1, tyranitarOptions()), mkPlan(2, salamenceOptions())],
+      actions: [{kind: 'move', slot: 1, moveIndex: 3}, {kind: 'move', slot: 2, moveIndex: 1, mega: true}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 3},
+      {kind: 'move', slot: 2, moveIndex: 1, mega: true},
+    ]);
+    expect(result.notes).toEqual([]);
+  });
+
+  it('班基拉斯在槽位 2 时同样强制 Mega', () => {
+    const request = mkTyranitarMegaRequest();
+    [request.active![0], request.active![1]] = [request.active![1], request.active![0]];
+    [request.side.pokemon[0], request.side.pokemon[1]] = [request.side.pokemon[1], request.side.pokemon[0]];
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request,
+      plans: [mkPlan(1, salamenceOptions(1)), mkPlan(2, tyranitarOptions(2))],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1}, {kind: 'move', slot: 2, moveIndex: 1}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1},
+      {kind: 'move', slot: 2, moveIndex: 1, mega: true},
+    ]);
+  });
+
+  it('非班基拉斯在场时不强制', () => {
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request: mkRequest(),
+      plans: [mkPlan(1, [mkMoveOption(1, 'move_1', 1), mkMoveOption(1, 'move_1_mega', 1)]), mkPlan(2, [mkMoveOption(2, 'move_1', 1)])],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1}, {kind: 'move', slot: 2, moveIndex: 1}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(result.notes).toEqual([]);
+  });
+
+  it('班基拉斯无 Mega 变体（没带石）时不强制', () => {
+    const request = mkTyranitarMegaRequest();
+    delete request.active![0].canMegaEvo;
+    const result = enforceTyranitarMega({
+      dex: mkDex(),
+      request,
+      plans: [mkPlan(1, [mkMoveOption(1, 'move_1', 1)]), mkPlan(2, [mkMoveOption(2, 'move_1', 1)])],
+      actions: [{kind: 'move', slot: 1, moveIndex: 1}, {kind: 'move', slot: 2, moveIndex: 1}],
+    });
+    expect(result.actions).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(result.notes).toEqual([]);
+  });
+});
+
+// ---------- H8 / H9 ----------
+
+/** 对手 Sneasler 曾放过 Fake Out、T3 又重新换入（T4 决策时仍处 Fake Out 窗口）；我方替补有位爱管侍与班基拉斯 */
+const GUARD_FOES = [
+  '|poke|p1|Milotic, L50, F|',
+  '|poke|p1|Salamence, L50, M|',
+  '|poke|p1|Indeedee, L50, M|',
+  '|poke|p1|Tyranitar, L50, M|',
+  '|poke|p2|Sneasler, L50, F|',
+  '|poke|p2|Charizard, L50, M|',
+  '|poke|p2|Kingambit, L50, F|',
+  '|poke|p2|Amoonguss, L50, F|',
+  '|teampreview|4',
+  '|teamsize|p1|4',
+  '|teamsize|p2|4',
+  '|start',
+  '|switch|p1a: Milotic|Milotic, L50, F|120/175',
+  '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+  '|switch|p2a: Sneasler|Sneasler, L50, F|160/160',
+  '|switch|p2b: Charizard|Charizard, L50, M|150/150',
+  '|turn|1',
+  '|move|p2a: Sneasler|Fake Out|p1a: Milotic',
+  '|turn|2',
+  '|switch|p2a: Kingambit|Kingambit, L50, F|200/200',
+  '|turn|3',
+  '|switch|p2a: Sneasler|Sneasler, L50, F|160/160',
+  '|turn|4',
+];
+
+/** 对应请求：场上 Milotic/Salamence（HP 不同便于验证槽位选择），替补爱管侍 + 班基拉斯 */
+function mkGuardRequest(): BattleRequest {
+  return {
+    active: [
+      {moves: [
+        {move: 'Muddy Water', id: 'muddywater', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      ]},
+      {moves: [
+        {move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      ]},
+    ],
+    side: {
+      name: 'JevBot1234',
+      id: 'p1',
+      pokemon: [
+        {ident: 'p1: Milotic', details: 'Milotic, L50, F', condition: '120/175', active: true, stats: MILOTIC_STATS, ability: 'marvelscale', moves: ['muddywater', 'protect']},
+        {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: SALAMENCE_STATS, ability: 'intimidate', moves: ['hypervoice', 'protect']},
+        {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', ability: 'psychicsurge', moves: ['expandingforce', 'trick']},
+        {ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: false, item: 'tyranitarite', ability: 'sandstream', moves: ['rockslide', 'knockoff']},
+      ],
+    },
+    rqid: 21,
+  };
+}
+
+describe('硬指令 H8：换爱管侍挡 Fake Out', () => {
+  it('对手刚换入已知 Fake Out 手时，把替补爱管侍换入（选 HP 最低槽位）', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines(GUARD_FOES);
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const guard = directives.find(d => d.note.includes('hard:fakeout'));
+    expect(guard?.slot).toBe(1);
+    expect(guard?.key).toBe('switch_3');
+    expect(guard?.note).toContain('Sneasler');
+  });
+
+  it('精神场地已在场时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines([...GUARD_FOES, '|-fieldstart|move: Psychic Terrain|[from]ability: Psychic Surge']);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('Fake Out 手一直在场（窗口已过）时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines([
+      ...GUARD_FOES.slice(0, GUARD_FOES.indexOf('|turn|2')),
+      '|turn|2',
+      '|turn|3',
+      '|turn|4',
+    ]);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('替补没有精神场地手时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    request.side.pokemon[2] = {...request.side.pokemon[2], ability: 'synchronize'};
+    const tracker = mkTrackerWithLines(GUARD_FOES);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('场地被覆盖与 Fake Out 威胁并存时，只产生抢场地的一条换入（不重复换同一只）', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines([...GUARD_FOES, '|-fieldstart|move: Electric Terrain']);
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    expect(directives.map(d => d.key)).toEqual(['switch_3']);
+    expect(directives[0].note).toContain('hard:terrain');
+  });
+});
+
+/** 雨天场景：对手 T1 降雨、T2 决策；我方替补班基拉斯 */
+const RAIN_FOES = [
+  '|poke|p1|Milotic, L50, F|',
+  '|poke|p1|Salamence, L50, M|',
+  '|poke|p1|Indeedee, L50, M|',
+  '|poke|p1|Tyranitar, L50, M|',
+  '|poke|p2|Charizard, L50, M|',
+  '|poke|p2|Amoonguss, L50, F|',
+  '|teampreview|4',
+  '|teamsize|p1|4',
+  '|teamsize|p2|4',
+  '|start',
+  '|switch|p1a: Milotic|Milotic, L50, F|120/175',
+  '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+  '|switch|p2a: Charizard|Charizard, L50, M|150/150',
+  '|switch|p2b: Amoonguss|Amoonguss, L50, F|200/200',
+  '|turn|1',
+  '|move|p2b: Amoonguss|Rain Dance|p2b: Amoonguss',
+  '|-weather|RainDance|[from]move: Rain Dance',
+  '|turn|2',
+];
+
+describe('硬指令 H9：雨天换班基拉斯覆盖', () => {
+  it('雨天生效且班基拉斯在替补时换入，用 Sand Stream 覆盖雨天', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines(RAIN_FOES);
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const cover = directives.find(d => d.note.includes('hard:rain-cover'));
+    expect(cover?.slot).toBe(1);
+    expect(cover?.key).toBe('switch_4');
+    expect(cover?.note).toContain('Tyranitar');
+  });
+
+  it('非雨天不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines(RAIN_FOES.map(line => line.replace('RainDance', 'SunnyDay')));
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('班基拉斯已倒下时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    request.side.pokemon[3].condition = '0 fnt';
+    const tracker = mkTrackerWithLines(RAIN_FOES);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('Fake Out 威胁与雨天并存时，两条换入指令各占一个槽位', () => {
+    const dex = mkDirectiveDex();
+    const request = mkGuardRequest();
+    const tracker = mkTrackerWithLines([...GUARD_FOES, '|-weather|RainDance|[from]move: Rain Dance']);
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    expect(directives.map(d => [d.slot, d.key])).toEqual([[1, 'switch_3'], [2, 'switch_4']]);
   });
 });

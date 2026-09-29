@@ -215,6 +215,19 @@ export function hpScaledBasePower(dex: DexData, moveId: string, hpPercent: numbe
   return Math.floor((move.basePower * hp) / 100);
 }
 
+/**
+ * 踢倒（Low Kick）按目标体重换算基础威力：PS basePowerCallback 的 kg 档位
+ * （200kg 及以上 120、100 及以上 100、50 及以上 80、25 及以上 60、10 及以上 40，否则 20）。
+ */
+export function lowKickPower(weightKg: number): number {
+  if (weightKg >= 200) return 120;
+  if (weightKg >= 100) return 100;
+  if (weightKg >= 50) return 80;
+  if (weightKg >= 25) return 60;
+  if (weightKg >= 10) return 40;
+  return 20;
+}
+
 /** 满投资中性性格能力值近似（L50，非 HP）：floor((2*base+94)/2)+5 = base+52；对手未知实际数值时的估算口径 */
 export function neutralStatTier(base: number): number {
   return Math.floor((2 * base + 94) / 2) + 5;

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {boostMultiplier, effectiveness, entryWeatherOf, estimateDamagePercent, hasEntryWeatherSetter, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, superEffectivePhrase, superEffectiveTypes, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
+import {boostMultiplier, effectiveness, entryWeatherOf, estimateDamagePercent, hasEntryWeatherSetter, hpScaledBasePower, lowKickPower, neutralSpeedTier, normalizeTypechart, speedNote, superEffectivePhrase, superEffectiveTypes, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -133,6 +133,24 @@ describe('estimateDamagePercent', () => {
   });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();
+  });
+});
+
+describe('lowKickPower', () => {
+  it('按对手体重返回 PS 档位威力（200kg 起为 120BP）', () => {
+    expect(lowKickPower(202)).toBe(120); // 班基拉斯 202kg
+    expect(lowKickPower(200)).toBe(120);
+    expect(lowKickPower(255)).toBe(120); // Mega 班基拉斯 255kg
+    expect(lowKickPower(199.9)).toBe(100);
+    expect(lowKickPower(100)).toBe(100);
+    expect(lowKickPower(99.9)).toBe(80);
+    expect(lowKickPower(50)).toBe(80);
+    expect(lowKickPower(49.9)).toBe(60);
+    expect(lowKickPower(25)).toBe(60);
+    expect(lowKickPower(24.9)).toBe(40);
+    expect(lowKickPower(10)).toBe(40);
+    expect(lowKickPower(9.9)).toBe(20);
+    expect(lowKickPower(0)).toBe(20);
   });
 });
 
