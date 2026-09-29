@@ -30,6 +30,8 @@ export interface PokemonState {
   /** 最近一次使用招式的原始名（|move| 事件，如 'Protect'）与回合号；用于连续保护等"上一动作"判定 */
   lastMoveId?: string;
   lastMoveTurn?: number;
+  /** 灭歌倒计时剩余回合（|start| perishN 的 N）；仅在场期间有效，换下/倒下清除 */
+  perish?: number;
 }
 
 export interface SideState {
@@ -130,6 +132,7 @@ export class BattleTracker {
         p.activePos = -1;
         p.volatiles = [];
         p.singleTurn = [];
+        p.perish = undefined;
       }
     }
   }
@@ -219,6 +222,7 @@ export class BattleTracker {
         p.boosts = {};
         p.volatiles = [];
         p.singleTurn = [];
+        p.perish = undefined;
         p.switchInTurn = s.turn;
         break;
       }
@@ -262,6 +266,7 @@ export class BattleTracker {
         if (cond.fainted) {
           p.fainted = true;
           p.status = 'fnt';
+          p.perish = undefined;
         }
         break;
       }
@@ -273,6 +278,7 @@ export class BattleTracker {
           p.hp = 0;
           p.hpPercent = 0;
           p.status = 'fnt';
+          p.perish = undefined;
         }
         break;
       }
@@ -402,6 +408,12 @@ export class BattleTracker {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
         if (p && a1) {
+          // 灭歌倒计时（perish3 → perish2 → perish1）每回合以 -start 重发并把旧值替换；不属于常规 volatile
+          const perish = /^perish(\d)$/.exec(a1);
+          if (perish) {
+            p.perish = Number(perish[1]);
+            break;
+          }
           const v = a1.replace(/^(move|item|ability): /, '');
           if (!p.volatiles.includes(v)) p.volatiles.push(v);
         }
@@ -415,6 +427,10 @@ export class BattleTracker {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
         if (p && a1) {
+          if (/^perish/.test(a1)) {
+            p.perish = undefined;
+            break;
+          }
           const v = a1.replace(/^(move|item|ability): /, '');
           p.volatiles = p.volatiles.filter(x => x !== v);
         }

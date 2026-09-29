@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {effectiveness, entryWeatherOf, estimateDamagePercent, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, superEffectivePhrase, superEffectiveTypes, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
+import {boostMultiplier, effectiveness, entryWeatherOf, estimateDamagePercent, hasEntryWeatherSetter, hpScaledBasePower, neutralSpeedTier, normalizeTypechart, speedNote, superEffectivePhrase, superEffectiveTypes, typechartFromDamageTaken, weatherAdjustedType} from '../src/state/calc.js';
 import {mkDex} from './helpers.js';
 
 describe('normalizeTypechart', () => {
@@ -78,6 +78,21 @@ describe('entryWeatherOf（入场天气特性）', () => {
   });
 });
 
+describe('hasEntryWeatherSetter（物种或其 Mega 形态的入场天气特性）', () => {
+  it('本体特性命中、经 Mega 形态命中、无天气特性时为 false', () => {
+    const dex = mkDex();
+    dex.species.charizardmegay = {
+      name: 'Charizard-Mega-Y', types: ['Fire', 'Flying'],
+      baseStats: {hp: 78, atk: 104, def: 78, spa: 159, spd: 115, spe: 100},
+      abilities: {0: 'Drought'}, baseSpecies: 'Charizard', requiredItem: 'Charizardite Y',
+    };
+    expect(hasEntryWeatherSetter(dex, 'Tyranitar')).toBe(true);
+    expect(hasEntryWeatherSetter(dex, 'Charizard')).toBe(true);
+    expect(hasEntryWeatherSetter(dex, 'Golisopod')).toBe(false);
+    expect(hasEntryWeatherSetter(dex, 'Missingno')).toBe(false);
+  });
+});
+
 describe('estimateDamagePercent', () => {
   const dex = mkDex();
   it('克制伤害远高于被抵抗伤害', () => {
@@ -118,6 +133,29 @@ describe('estimateDamagePercent', () => {
   });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();
+  });
+});
+
+describe('能力阶级折算（boostMultiplier）', () => {
+  it('按 Gen 3+ 曲线换算并 clamp ±6', () => {
+    expect(boostMultiplier(0)).toBe(1);
+    expect(boostMultiplier(1)).toBe(1.5);
+    expect(boostMultiplier(2)).toBe(2);
+    expect(boostMultiplier(-1)).toBeCloseTo(2 / 3);
+    expect(boostMultiplier(-2)).toBe(0.5);
+    expect(boostMultiplier(6)).toBe(4);
+    expect(boostMultiplier(-6)).toBe(0.25);
+    expect(boostMultiplier(9)).toBe(4);
+    expect(boostMultiplier(-9)).toBe(0.25);
+  });
+  it('estimateDamagePercent 按攻守当前阶级折算，未传阶级时保持旧行为', () => {
+    const dex = mkDex();
+    const base = {dex, moveId: 'ironhead', attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, defenderSpecies: 'Victreebel'};
+    expect(estimateDamagePercent(base)).toBe(69);
+    expect(estimateDamagePercent({...base, attackerBoosts: {atk: -2}})).toBe(34);
+    expect(estimateDamagePercent({...base, attackerBoosts: {spa: -6}})).toBe(69);
+    expect(estimateDamagePercent({...base, defenderBoosts: {def: 2}})).toBe(42);
+    expect(estimateDamagePercent({...base, defenderBoosts: {spd: -6}})).toBe(69);
   });
 });
 

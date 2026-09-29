@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {BattleTracker} from '../src/state/tracker.js';
+import {mkTrackerWithLines} from './helpers.js';
 
 /** 回放协议样本：玩家名、rating 与 battle id 均为虚拟值 */
 const replay = `|gametype|doubles
@@ -161,6 +162,65 @@ describe('BattleTracker', () => {
     const t = feed(replay, 'TestBot');
     const corviknight = t.state.sides.p1.pokemon.find(p => p.name === 'Corviknight')!;
     expect(corviknight.boosts.def).toBe(4);
+  });
+
+  it('灭歌倒计时按服务端最新值替换且不写入 volatiles', () => {
+    const t = mkTrackerWithLines([
+      '|poke|p1|Chandelure, L50, F|',
+      '|poke|p2|Victreebel, L50, M|',
+      '|start',
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-fieldactivate|move: Perish Song',
+      '|-start|p1a: Chandelure|perish3|[silent]',
+      '|-start|p2a: Victreebel|perish3|[silent]',
+      '|turn|2',
+      '|-start|p1a: Chandelure|perish2|[silent]',
+      '|-start|p2a: Victreebel|perish2|[silent]',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    expect(chandelure.perish).toBe(2);
+    expect(t.findPokemon('p2', 'Victreebel')!.perish).toBe(2);
+    expect(chandelure.volatiles).not.toContain('perish3');
+    expect(chandelure.volatiles).not.toContain('perish2');
+  });
+
+  it('换下清除灭歌倒计时，换入者不受影响', () => {
+    const t = mkTrackerWithLines([
+      '|poke|p1|Chandelure, L50, F|',
+      '|poke|p1|Golisopod, L50, M|',
+      '|start',
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|turn|1',
+      '|-start|p1a: Chandelure|perish2|[silent]',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    expect(chandelure.perish).toBe(2);
+    t.handleLine('|switch|p1a: Golisopod|Golisopod, L50, M|150/150');
+    expect(chandelure.perish).toBeUndefined();
+    expect(t.findPokemon('p1', 'Golisopod')!.perish).toBeUndefined();
+  });
+
+  it('|-end 与倒下都清除灭歌倒计时', () => {
+    const t = mkTrackerWithLines([
+      '|poke|p1|Chandelure, L50, F|',
+      '|poke|p2|Victreebel, L50, M|',
+      '|start',
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-start|p1a: Chandelure|perish2|[silent]',
+      '|-start|p2a: Victreebel|perish1|[silent]',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    const victreebel = t.findPokemon('p2', 'Victreebel')!;
+    expect(chandelure.perish).toBe(2);
+    expect(victreebel.perish).toBe(1);
+    t.handleLine('|-end|p1a: Chandelure|perish2|[silent]');
+    expect(chandelure.perish).toBeUndefined();
+    t.handleLine('|-damage|p2a: Victreebel|0 fnt');
+    expect(victreebel.perish).toBeUndefined();
   });
 
   it('天气、场地、side condition 生命周期', () => {

@@ -100,15 +100,32 @@ describe('三类构造器复用分析', () => {
     expect(option?.label).toContain('incoming ≈63%');
     expect(option?.label).toContain('costs your action this turn');
   });
-  it('主攻属性被降时，招式选项带估算偏差提醒且换人选项带优先换人引导', () => {
+  it('主攻属性被降时，招式估算按当前阶级折算并引导优先换人', () => {
     const request = mkRequest();
     const tracker = mkTracker();
     const chandelure = tracker.state.sides.p1!.pokemon.find(p => p.species === 'Chandelure')!;
     chandelure.boosts = {spa: -2};
     const plans = buildTurnPlans({dex, request, tracker});
     const slot2 = plans.find(p => p.slot === 2)!;
-    expect(slot2.options.find(o => o.key === 'move_1_foe_a')?.label).toMatch(/does not include stat stages/);
+    const drop = slot2.options.find(o => o.key === 'move_1_foe_a')?.label ?? '';
+    expect(drop).toContain('≈35%');
+    expect(drop).toMatch(/already includes that stat stage/);
+    expect(drop).toMatch(/prioritize switching out/);
     expect(slot2.options.find(o => o.key === 'switch_3')?.label).toContain('main special attacker');
+  });
+  it('灭歌倒计时与对手睡眠都写进选项：换人重置、抓紧输出', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    tracker.state.sides.p1!.pokemon.find(p => p.species === 'Chandelure')!.perish = 2;
+    tracker.state.sides.p2!.pokemon.find(p => p.species === 'Victreebel')!.status = 'slp';
+    const plans = buildTurnPlans({dex, request, tracker});
+    const slot2 = plans.find(p => p.slot === 2)!;
+    const move = slot2.options.find(o => o.key === 'move_1_foe_a')!.label;
+    expect(move).toContain('perish2');
+    expect(move).toMatch(/prioritize switching out/);
+    expect(move).toContain('Victreebel is asleep');
+    const swap = slot2.options.find(o => o.key === 'switch_3')!.label;
+    expect(swap).toContain('resets the Perish Song countdown on Chandelure (perish2)');
   });
   it('戏法空间选项带我方慢速成员的收益事实（含在场标记与对手中性档位）', () => {
     const request = mkRequest();
@@ -133,7 +150,8 @@ describe('三类构造器复用分析', () => {
     const plans = buildSwitchPlans({dex, request, tracker, analysis});
     expect(plans.map(p => p.questionName)).toEqual(['switch_slot_1']);
     expect(plans[0].options.find(o => o.key === 'switch_3')?.label).toContain('incoming ≈64%');
-    expect(JSON.stringify(plans)).not.toMatch(/costs your action|uses.*action|fainted and|before the next turn/);
+    // 词边界避免子串误报（interaction 含 action）；"uses ... action(s)" 指消耗行动的表述
+    expect(JSON.stringify(plans)).not.toMatch(/costs your action|uses\b[^"]*\bactions?\b|fainted and|before the next turn/);
     expect(plans[0].options[0].label).toContain('forced replacement');
     const legacy = buildSwitchPlans({dex, request, tracker});
     expect(legacy[0].options[0].label).not.toContain('costs your action');
@@ -170,6 +188,32 @@ describe('三类构造器复用分析', () => {
     const l1 = buildAnalysisContext({dex, request, state, level: 1});
     const l1Instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis: l1}).questions.lead_1.instructions;
     expect(l1Instructions).not.toMatch(/Mega-capable/i);
+  });
+  it('L2 preview 天气引导：对手有天气手时优先带自家天气手覆盖，不限于 Mega 进化者', () => {
+    const weatherDex = mkDex();
+    weatherDex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex: weatherDex, request, state: mkTracker().state, level: 2});
+    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).questions.lead_1.instructions;
+    expect(instructions).toMatch(/set weather on entry.*Torkoal/i);
+    expect(instructions).toMatch(/overwrite it with your own entry weather/i);
+    expect(instructions).toMatch(/takes priority over the one-Mega guideline/i);
+    expect(instructions).toMatch(/does not need to be the Pokemon that Mega Evolves/i);
+  });
+  it('L2 preview 天气引导：对手无天气手时不输出该段', () => {
+    const request = mkRequest();
+    const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
+    const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).questions.lead_1.instructions;
+    expect(instructions).not.toMatch(/set weather on entry/i);
+  });
+  it('L2 preview 天气引导：我方没有天气手时不输出该段', () => {
+    const weatherDex = mkDex();
+    weatherDex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    const request = mkRequest();
+    request.side.pokemon[2].details = 'Golisopod, L50, M';
+    const analysis = buildAnalysisContext({dex: weatherDex, request, state: mkTracker().state, level: 2});
+    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).questions.lead_1.instructions;
+    expect(instructions).not.toMatch(/set weather on entry/i);
   });
 });
 
@@ -322,6 +366,28 @@ describe('buildTurnPlans', () => {
     request.side.pokemon[0].item = 'tyranitarite';
     const mega = buildTurnPlans({dex: data, request, tracker: mkTracker()})[0].options.find(o => o.key === 'move_1_foe_a_mega');
     expect(mega?.label).toContain('into Tyranitar-Mega (ability Sand Stream, Atk 134→164, Def 110→150, SpD 100→120, Speed 61→71)');
+  });
+
+  it('天气特性 Mega（Sand Stream）标注形态变化会再次触发并覆盖场上天气', () => {
+    const data = mkDex();
+    data.species.tyranitarmega = {
+      name: 'Tyranitar-Mega', types: ['Rock', 'Dark'],
+      baseStats: {hp: 100, atk: 164, def: 150, spa: 95, spd: 120, spe: 71},
+      abilities: {0: 'Sand Stream'}, baseSpecies: 'Tyranitar', requiredItem: 'Tyranitarite',
+    };
+    const request = mkRequest();
+    request.side.pokemon[0].details = 'Tyranitar, L50, M';
+    request.side.pokemon[0].item = 'tyranitarite';
+    const mega = buildTurnPlans({dex: data, request, tracker: mkTracker()})[0].options.find(o => o.key === 'move_1_foe_a_mega');
+    expect(mega?.label).toMatch(/re-activates Sand Stream/i);
+    expect(mega?.label).toMatch(/setting sandstorm again/i);
+    expect(mega?.label).toMatch(/overwriting the current weather/i);
+  });
+
+  it('非天气特性 Mega 不标注天气再触发', () => {
+    const mega = buildTurnPlans({dex, request: mkRequest(), tracker: mkTracker()})[0].options.find(o => o.key === 'move_1_foe_a_mega');
+    expect(mega?.label).toMatch(/ability Tough Claws/);
+    expect(mega?.label).not.toMatch(/re-activates/i);
   });
 
   it('Coil 选项按在场对手的物攻倾向分层增强价值', () => {

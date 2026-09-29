@@ -1,7 +1,7 @@
 import type {DexData} from '../dex/index.js';
 import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import type {BattleState, PokemonState, SideState} from './tracker.js';
-import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, superEffectivePhrase, weatherAdjustedType} from './calc.js';
+import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, neutralStatTier, superEffectivePhrase, weatherAdjustedType} from './calc.js';
 import {toId} from './protocol.js';
 
 export interface OurSpeed {
@@ -29,6 +29,8 @@ export interface PreviewFoe {
   baseSpeed: number | null;
   itemRevealed: string | null;
   abilityRevealed: string | null;
+  /** 在场对手的当前能力阶级；替补/未上场为空对象（换下后旧阶级不再有效） */
+  boosts?: Record<string, number>;
 }
 
 export interface IncomingEstimate {
@@ -70,7 +72,7 @@ export interface AnalysisInput {
   level: 1 | 2 | 3;
 }
 
-export const DAMAGE_CAVEAT = 'rough comparison only, not a calibrated actual HP% prediction; ignores real defensive stats, boosts, items, abilities and other battle modifiers';
+export const DAMAGE_CAVEAT = 'rough comparison only, not a calibrated actual HP% prediction; uses your known stats when available and base-stat estimates for opponents; applies known stat stages; ignores items, abilities and other battle modifiers';
 
 /** ident 包含昵称；不以物种匹配，避免同种个体和 Mega 形态之间错配。 */
 export function findOurPokemon(side: SideState | undefined, pokemon: RequestPokemon): PokemonState | undefined {
@@ -142,22 +144,37 @@ function ourSpeed(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   return {slot, ident: pokemon.ident, species: speciesOf(pokemon), requestSpeed, speed: speed === null ? null : Math.max(1, speed), notes, uncertain};
 }
 
-/** 已揭示招式的来袭粗估集中在此，渲染层不再维护第二套计算。 */
+/**
+ * 已揭示招式的来袭粗估集中在此，渲染层不再维护第二套计算。
+ * 攻击值按对手当前形态（未 Mega = 基础形态，已 Mega = Mega 形态）的满投资中性近似折算；
+ * 守方（我方）按传入的实际 def/spd 折算（如 request 的 stats），缺数值时回落种族值；
+ * 传入当前能力阶级（boosts）时按 PS 曲线折算，估算反映场上的实际输出与承伤；
+ * 缺形态数据时回落 estimateDamagePercent 的 150 默认值（只体现威力）。
+ */
 export function estimateRevealedIncoming(input: {
   dex: DexData;
   defenderSpecies: string;
+  /** 守方（我方）已知实际能力值：传入则伤害估算按此折减，优先于种族值 */
+  defenderStats?: Record<string, number>;
+  /** 守方（我方）当前能力阶级（def/spd）：已知时按当前值折算承伤 */
+  defenderBoosts?: Record<string, number>;
   weather?: string;
-  foe: {ident?: string; species: string; revealedMoves: string[]; ability?: string | null};
+  foe: {ident?: string; species: string; revealedMoves: string[]; ability?: string | null; boosts?: Record<string, number>};
 }): IncomingEstimate {
   const {dex, foe, defenderSpecies} = input;
   const attacker = dex.species[toId(foe.species)];
+  const baseStats = attacker?.baseStats;
+  const attackerStats = baseStats && Number.isFinite(baseStats.atk) && Number.isFinite(baseStats.spa)
+    ? {atk: neutralStatTier(baseStats.atk), spa: neutralStatTier(baseStats.spa)}
+    : undefined;
   let roughPercent: number | null = null;
   const unknownMoves: string[] = [];
   for (const id of foe.revealedMoves) {
     const move = dex.moves[toId(id)];
     if (!move) { unknownMoves.push(id); continue; }
     if (move.category === 'Status') continue;
-    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, defenderSpecies,
+    const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, attackerStats, defenderSpecies,
+      defenderStats: input.defenderStats, attackerBoosts: foe.boosts, defenderBoosts: input.defenderBoosts,
       weather: input.weather, attackerAbility: foe.ability ?? undefined}) : null;
     if (pct === null) unknownMoves.push(id);
     else roughPercent = Math.max(roughPercent ?? 0, pct);
@@ -191,6 +208,9 @@ function teamNote(input: AnalysisInput, pokemon: RequestPokemon, slot: number): 
   if (ability === 'sandstream') {
     const sandRushTeammate = hasTeammate(p => toId(p.ability ?? p.baseAbility ?? '') === 'sandrush');
     notes.push('Sand Stream sets temporary sandstorm on entry; the weather is contested: it expires and a foe can replace or suppress it');
+    if (canMega && Object.values(mega?.abilities ?? {}).some(a => toId(a) === 'sandstream')) {
+      notes.push('Mega Evolving this Pokemon also re-activates Sand Stream on the form change, setting sandstorm again and overwriting whatever weather is active');
+    }
     notes.push(sandRushTeammate
       ? "Re-entering with this Pokemon re-sets sandstorm and can overwrite a foe's weather; while the sand is up the Sand Rush teammate keeps its double speed, so losing the weather hands the foe a speed swing"
       : "Re-entering with this Pokemon re-sets sandstorm and can overwrite a foe's weather");
@@ -308,6 +328,7 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
     ident: p.ident, species: p.species, types: [...(dex.species[toId(p.species)]?.types ?? [])],
     baseSpeed: positiveNumber(dex.species[toId(p.species)]?.baseStats.spe),
     itemRevealed: p.consumedItem ? null : p.item ?? null, abilityRevealed: p.ability ?? null,
+    boosts: p.activePos >= 0 && !p.fainted ? {...p.boosts} : {},
   }));
   const oppSpeedEstimates: OppSpeedEstimate[] = previewFoes.map(p => ({
     ident: p.ident, species: p.species, baseSpeed: p.baseSpeed, speed: null,
@@ -329,14 +350,17 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
     const ourTypes = dex.species[toId(species)]?.types ?? [];
     // 当前天气优先；无天气时按自身入场造天气（如 Drought）推定气象球属性
     const entryWeather = state.weather || entryWeatherOf(p);
+    // 只有当前在场成员才有有效能力阶级；替补不套用已失效的旧值（换下后阶级清零）
+    const trackedOur = p.active ? findOurPokemon(state.sides[ourSide], p) : undefined;
     const outgoing = previewFoes.flatMap(foe => (p.moves ?? []).flatMap(id => {
       const move = dex.moves[toId(id)];
       if (move?.category === 'Status') return [];
       const type = move ? weatherAdjustedType(id, move.type, entryWeather) : null;
-      // 与渲染层同源的伤害粗估：STAB、攻击值、克制、spread、天气全部计入
+      // 与渲染层同源的伤害粗估：STAB、攻击值、当前能力阶级、克制、spread、天气全部计入
       const damage = move ? estimateDamagePercent({
         dex, moveId: id, attackerTypes: ourTypes, attackerStats: p.stats,
         attackerAbility: p.ability ?? p.baseAbility, defenderSpecies: foe.species,
+        attackerBoosts: trackedOur?.boosts, defenderBoosts: foe.boosts,
         isSpread: spreadPenaltyNow(move.target),
         weather: entryWeather,
         powerOverride: toId(id) === 'lastrespects' ? 50 + 50 * faintedAllies : undefined,
@@ -350,7 +374,7 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
         multiplier: !values.length || values.some(v => v === null) ? null : Math.max(...values as number[])};
     });
     const incoming = foes.filter(foe => foe.activePos >= 0 && !foe.fainted && foe.hpPercent > 0)
-      .map(foe => estimateRevealedIncoming({dex, defenderSpecies: species, weather: state.weather, foe}));
+      .map(foe => estimateRevealedIncoming({dex, defenderSpecies: species, defenderStats: p.stats, defenderBoosts: trackedOur?.boosts, weather: state.weather, foe}));
     return {slot: index + 1, ident: p.ident, outgoing, potentialStab, incoming};
   });
   return {

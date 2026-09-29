@@ -1,7 +1,7 @@
 import {megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
 import type {ChoiceQuestion} from '../jev/types.js';
 import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
-import {estimatedMove, megaSkinAbility, superEffectivePhrase} from '../state/calc.js';
+import {entryWeatherOf, estimatedMove, megaSkinAbility, superEffectivePhrase} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
   activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
@@ -78,6 +78,15 @@ function megaSummaryOf(dex: DexData, species: string, item?: string): string {
   }) : [];
   const details = [ability ? `ability ${ability}` : '', ...changes].filter(Boolean);
   return details.length ? `${form.name} (${details.join(', ')})` : form.name;
+}
+
+/** 天气型 Mega（如 Sand Stream 班基拉斯）的形态变化说明：再次触发特性并覆盖场上天气；非天气 Mega 返回 null */
+function megaWeatherNoteOf(dex: DexData, species: string, item?: string): string | null {
+  const form = megaFormsOf(dex, species).find(f => !!f.requiredItem && (item === undefined || toId(f.requiredItem) === toId(item)));
+  const ability = form ? Object.values(form.abilities ?? {})[0] : undefined;
+  const weather = ability ? entryWeatherOf({ability}) : undefined;
+  if (!ability || !weather) return null;
+  return `the form change also re-activates ${ability}, setting ${weather.toLowerCase()} again and overwriting the current weather`;
 }
 
 /** 皮肤型 Mega（-ate 特性）的打击面说明：转换后属性 + 其克制列表；未发生转换或天气已改属性时 null */
@@ -204,9 +213,10 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         maxpp: mv.maxpp,
         attackerTypes: types,
         attackerStats: me.stats,
+        attackerBoosts: trackedSelf?.boosts,
         attackerAbility: me.ability ?? me.baseAbility,
-        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident} : undefined,
-        targets: hitsBoth && foes.length ? foes.map(f => ({label: f.label, species: f.species, hpPercent: f.hpPercent, ident: f.ident})) : undefined,
+        target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident, status: foe.status, boosts: foe.boosts} : undefined,
+        targets: hitsBoth && foes.length ? foes.map(f => ({label: f.label, species: f.species, hpPercent: f.hpPercent, ident: f.ident, status: f.status, boosts: f.boosts})) : undefined,
         analysis: input.analysis,
         attackerSlot: teamSlotOf(request, me),
         hitsBoth,
@@ -220,6 +230,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         attackerMoves: reqActive.moves.map(entry => entry.id),
         opponentMegaUsed,
         attackerMainAttack: mainAttack,
+        attackerPerish: trackedSelf?.perish,
         ourLiveSpeeds,
         activeFoes: foes.flatMap(f => (f.ident ? [f.ident] : [])),
         physicalFoes,
@@ -235,9 +246,10 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         const skin = megaSkinAbility(dex, species, me.item);
         const megaLabel = skin ? describeMoveOption({...optionInput, attackerAbility: skin}) : described;
         const coverage = skin && moveInfo ? skinCoverageOf(dex, skin, mv.id, moveInfo.type, weather) : null;
+        const weatherNote = megaWeatherNoteOf(dex, species, me.item);
         options.push({
           key: `${key}_mega`,
-          label: `${megaLabel}${wideSuffix} — MEGA EVOLVE ${species} into ${megaSummaryOf(dex, species, me.item)} with this move (${coverage ? `${coverage}; ` : ''}your team's only Mega; the form change resolves at the start of the turn before any moves, so the new stats and ability already apply this turn — including to this attack and this turn's move order; it also still happens if this Pokemon cannot act this turn (asleep, paralyzed or flinching))`,
+          label: `${megaLabel}${wideSuffix} — MEGA EVOLVE ${species} into ${megaSummaryOf(dex, species, me.item)} with this move (${coverage ? `${coverage}; ` : ''}your team's only Mega; the form change resolves at the start of the turn before any moves, so the new stats and ability already apply this turn — including to this attack and this turn's move order; it also still happens if this Pokemon cannot act this turn (asleep, paralyzed or flinching)${weatherNote ? `; ${weatherNote}` : ''})`,
           action: {...action, mega: true},
         });
       }
@@ -245,12 +257,13 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
   }
 
   if (reqActive.trapped !== true) {
-    // 换出收益（给 jev 比较换人时的正向理由）：Yawn 解除、低血保存、负面阶级清零
+    // 换出收益（给 jev 比较换人时的正向理由）：Yawn/灭歌解除、低血保存、负面阶级清零
     const outgoing = {
       species,
       yawning: (trackedSelf?.volatiles ?? []).some(v => toId(v) === 'yawn'),
       hpPercent: conditionPercent(me.condition),
       boosts: trackedSelf?.boosts,
+      perish: trackedSelf?.perish,
       mainAttack,
     };
     for (const bench of benchEntries(request)) {

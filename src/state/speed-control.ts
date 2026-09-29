@@ -111,7 +111,7 @@ export function speedControlText(state: BattleState, ourSideId?: string): string
   }
   if (control.our_tailwind) {
     clauses.push(
-      `Your-side Tailwind is active with ${turnsPhrase(control.our_tailwind.turns_left)} (your Pokemon move at doubled Speed)`,
+      `Your-side Tailwind is active with ${turnsPhrase(control.our_tailwind.turns_left)} (your Pokemon move at doubled Speed; prefer attacking with every slot while the window lasts rather than spending turns on Protect, healing or switching)`,
     );
   }
   if (control.weather) {

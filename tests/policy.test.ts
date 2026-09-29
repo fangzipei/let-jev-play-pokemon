@@ -1,5 +1,6 @@
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import type {AdvisorClient} from '../src/jev/advisor.js';
+import {resetHardDirectives} from '../src/decide/hard-directives.js';
 import {decideChoice, type DecisionContext} from '../src/decide/policy.js';
 import {parsePikaList, pikaToPriors, type PikaMeta} from '../src/dex/pikalytics.js';
 import type {DecideInput, JevClient} from '../src/jev/client.js';
@@ -7,7 +8,7 @@ import type {Answer} from '../src/jev/types.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
 import {emptyMemory} from '../src/learn/store.js';
 import type {BattleRequest} from '../src/state/request.js';
-import {mkDex, mkRequest, mkTracker} from './helpers.js';
+import {mkDex, mkRequest, mkTracker, mkTrackerWithLines} from './helpers.js';
 
 function mkJev(answers: Record<string, Answer> | ((input: DecideInput) => Record<string, Answer>)): JevClient {
   return {
@@ -489,5 +490,160 @@ describe('对手注解与经验注入接线', () => {
     await decideChoice(ctx);
     expect(captured.lead_1.instructions).toContain('Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
     expect(captured.lead_1.instructions).toContain('vs Sneasler 4W-5L');
+  });
+});
+
+describe('硬指令接线', () => {
+  beforeEach(() => resetHardDirectives());
+
+  const hardDex = () => {
+    const dex = mkDex();
+    dex.species.indeedee = {name: 'Indeedee', types: ['Psychic', 'Normal'], baseStats: {hp: 60, atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, abilities: {0: 'Psychic Surge'}};
+    dex.species.milotic = {name: 'Milotic', types: ['Water'], baseStats: {hp: 95, atk: 60, def: 79, spa: 100, spd: 125, spe: 81}, abilities: {0: 'Marvel Scale'}};
+    return dex;
+  };
+
+  it('team-preview：连续两局把场地手放在首发时，第二局被移出前两位并记录审计', async () => {
+    const request = mkRequest({teamPreview: true});
+    request.active = undefined;
+    request.side.pokemon = ['Indeedee', 'Milotic', 'Salamence', 'Golisopod', 'Tyranitar', 'Chandelure'].map(name => ({
+      ident: `p1: ${name}`, details: `${name}, L50, M`, condition: '100/100', active: false,
+    }));
+    const answers: Record<string, Answer> = {
+      lead_1: {type: 'choice', choice: 'slot_1'},
+      lead_2: {type: 'choice', choice: 'slot_2'},
+      bring_3: {type: 'choice', choice: 'slot_3'},
+      bring_4: {type: 'choice', choice: 'slot_4'},
+    };
+    const first = mkCtx({request, jev: mkJev(answers)});
+    first.dex = hardDex();
+    const out1 = await decideChoice(first);
+    expect(out1?.command).toBe('/choose team 123456|7');
+
+    const second = mkCtx({request, jev: mkJev(answers)});
+    second.dex = hardDex();
+    const out2 = await decideChoice(second);
+    expect(out2?.command).toBe('/choose team 321456|7');
+    expect(out2?.adjusted.some(a => a.startsWith('hard:lead-rotate'))).toBe(true);
+  });
+
+  it('team-preview：对手预览有天气手时把班基拉斯补入前四位并记录审计', async () => {
+    const request = mkRequest({teamPreview: true});
+    request.active = undefined;
+    request.side.pokemon = ['Indeedee', 'Milotic', 'Salamence', 'Golisopod', 'Tyranitar', 'Chandelure'].map(name => ({
+      ident: `p1: ${name}`, details: `${name}, L50, M`, condition: '100/100', active: false,
+    }));
+    const answers: Record<string, Answer> = {
+      lead_1: {type: 'choice', choice: 'slot_1'},
+      lead_2: {type: 'choice', choice: 'slot_2'},
+      bring_3: {type: 'choice', choice: 'slot_3'},
+      bring_4: {type: 'choice', choice: 'slot_4'},
+    };
+    const ctx = mkCtx({request, jev: mkJev(answers)});
+    ctx.dex = hardDex();
+    ctx.dex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
+    ctx.tracker.handleLine('|poke|p2|Torkoal, L50, M|');
+    const out = await decideChoice(ctx);
+    expect(out?.command).toBe('/choose team 123546|7');
+    expect(out?.adjusted.some(a => a.startsWith('hard:weather-bring'))).toBe(true);
+  });
+
+  const HYPNOSIS_LINES = [
+    '|poke|p1|Milotic, L50, F|',
+    '|poke|p1|Salamence, L50, M|',
+    '|poke|p2|Kingambit, L50, F|',
+    '|poke|p2|Sneasler, L50, F|',
+    '|teamsize|p1|4',
+    '|teamsize|p2|4',
+    '|start',
+    '|switch|p1a: Milotic|Milotic, L50, F|175/175',
+    '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+    '|switch|p2a: Kingambit|Kingambit, L50, F|200/200',
+    '|switch|p2b: Sneasler|Sneasler, L50, F|160/160',
+    '|turn|2',
+    '|-boost|p1a: Milotic|accuracy|1',
+  ];
+
+  it('turn：Coil 强化在身时强制催眠覆盖模型答案', async () => {
+    const request: BattleRequest = {
+      active: [
+        {moves: [
+          {move: 'Hypnosis', id: 'hypnosis', pp: 20, maxpp: 20, target: 'normal'},
+          {move: 'Muddy Water', id: 'muddywater', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        ]},
+        {moves: [{move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'}]},
+      ],
+      side: {
+        name: 'JevBot1234',
+        id: 'p1',
+        pokemon: [
+          {ident: 'p1: Milotic', details: 'Milotic, L50, F', condition: '175/175', active: true, stats: {atk: 60, def: 79, spa: 100, spd: 125, spe: 81}, moves: ['hypnosis', 'muddywater']},
+          {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: {atk: 135, def: 100, spa: 110, spd: 100, spe: 100}, moves: ['hypervoice']},
+          {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', moves: ['trick']},
+        ],
+      },
+      rqid: 7,
+    };
+    const ctx = mkCtx({request, jev: mkJev({
+      action_slot_1: {type: 'choice', choice: 'move_2'},
+      action_slot_2: {type: 'choice', choice: 'move_1'},
+    })});
+    ctx.dex = hardDex();
+    ctx.tracker = mkTrackerWithLines(HYPNOSIS_LINES);
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.chosen).toEqual([
+      {kind: 'move', slot: 1, moveIndex: 1, target: '+2'},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(outcome?.adjusted.some(a => a.startsWith('hard:hypnosis'))).toBe(true);
+    expect(outcome?.fallback).toBe(false);
+  });
+
+  const TERRAIN_LINES = [
+    '|poke|p1|Milotic, L50, F|',
+    '|poke|p1|Salamence, L50, M|',
+    '|poke|p1|Indeedee, L50, M|',
+    '|poke|p2|Rillaboom, L50, M|',
+    '|teamsize|p1|4',
+    '|teamsize|p2|4',
+    '|start',
+    '|switch|p1a: Milotic|Milotic, L50, F|120/175',
+    '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+    '|switch|p2a: Rillaboom|Rillaboom, L50, M|200/200',
+    '|turn|1',
+    '|-fieldstart|Grassy Terrain|[from] ability: Grassy Surge|[of] p2a: Rillaboom',
+  ];
+
+  it('turn：对手覆盖场地时强制换入场地手替换槽位动作', async () => {
+    const request: BattleRequest = {
+      active: [
+        {moves: [{move: 'Muddy Water', id: 'muddywater', pp: 10, maxpp: 10, target: 'allAdjacentFoes'}]},
+        {moves: [{move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'}]},
+      ],
+      side: {
+        name: 'JevBot1234',
+        id: 'p1',
+        pokemon: [
+          {ident: 'p1: Milotic', details: 'Milotic, L50, F', condition: '120/175', active: true, stats: {atk: 60, def: 79, spa: 100, spd: 125, spe: 81}, moves: ['muddywater']},
+          {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: {atk: 135, def: 100, spa: 110, spd: 100, spe: 100}, moves: ['hypervoice']},
+          {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', ability: 'psychicsurge', moves: ['trick']},
+          {ident: 'p1: Golisopod', details: 'Golisopod, L50, M', condition: '150/150', active: false, moves: ['ironhead']},
+        ],
+      },
+      rqid: 7,
+    };
+    const ctx = mkCtx({request, jev: mkJev({
+      action_slot_1: {type: 'choice', choice: 'move_1'},
+      action_slot_2: {type: 'choice', choice: 'move_1'},
+    })});
+    ctx.dex = hardDex();
+    ctx.tracker = mkTrackerWithLines(TERRAIN_LINES);
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.chosen).toEqual([
+      {kind: 'switch', slot: 1, teamIndex: 3},
+      {kind: 'move', slot: 2, moveIndex: 1},
+    ]);
+    expect(outcome?.adjusted.some(a => a.startsWith('hard:terrain'))).toBe(true);
+    expect(outcome?.fallback).toBe(false);
   });
 });

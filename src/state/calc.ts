@@ -132,23 +132,43 @@ export function entryWeatherOf(pokemon: {ability?: string; baseAbility?: string}
   return ENTRY_WEATHER[toId(pokemon.ability ?? '')] ?? ENTRY_WEATHER[toId(pokemon.baseAbility ?? '')];
 }
 
+/** 物种本体或其任一 Mega 形态是否具备入场天气特性（预览时判断对手能否自带天气覆盖） */
+export function hasEntryWeatherSetter(dex: DexData, species: string): boolean {
+  const has = (abilities: Record<string, string> | undefined) =>
+    Object.values(abilities ?? {}).some(a => ENTRY_WEATHER[toId(a)]);
+  return has(dex.species[toId(species)]?.abilities) || megaFormsOf(dex, species).some(form => has(form.abilities));
+}
+
 export interface DamageEstimateInput {
   dex: DexData;
   moveId: string;
   attackerTypes: string[];
   attackerStats?: Record<string, number>;
+  /** 攻击方当前能力阶级（atk/spa）：已知时按 PS 曲线折算实际输出 */
+  attackerBoosts?: Record<string, number>;
   /** 攻击方当前特性：Adaptability 把本系加成提到 2.0x；-ate 皮肤（Aerilate 等）转换一般系招式属性并加 1.2x 威力 */
   attackerAbility?: string;
   defenderSpecies: string;
+  /** 守方已知实际能力值（如我方 request 的 stats）：传入则优先于物种基础种族值 */
+  defenderStats?: Record<string, number>;
+  /** 守方当前能力阶级（def/spd）：已知时按 PS 曲线折算实际承伤 */
+  defenderBoosts?: Record<string, number>;
   isSpread?: boolean;
   weather?: string;
   /** 覆盖招式基础威力（如 Last Respects 按已阵亡队友数成长） */
   powerOverride?: number;
 }
 
+/** 能力阶级倍率（Gen 3+）：stage ≥ 0 → (2+stage)/2；stage < 0 → 2/(2−stage)；clamp ±6 */
+export function boostMultiplier(stage: number): number {
+  const s = Math.max(-6, Math.min(6, stage));
+  return s >= 0 ? (2 + s) / 2 : 2 / (2 - s);
+}
+
 /**
  * 粗估伤害（绝对数值不保证精确，只用于相对比较）。
- * 简单公式：BP × 攻方系数 × 克制 × STAB × spread × 天气，再按守方种族值换算成 HP 百分比。
+ * 简单公式：BP × 攻方系数 × 克制 × STAB × spread × 天气，再按守方防御能力值（有实际值优先，否则种族值）换算成 HP 百分比。
+ * 已知攻守能力阶级（boosts）时按 PS 曲线折算：估算始终反映当前场上的实际输出与承伤。
  */
 export function estimateDamagePercent(input: DamageEstimateInput): number | null {
   const move = input.dex.moves[toId(input.moveId)];
@@ -165,8 +185,13 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   const stab = input.attackerTypes.some(t => toId(t) === toId(moveType))
     ? (toId(input.attackerAbility ?? '') === 'adaptability' ? 2 : 1.5)
     : 1;
-  const offStat = (move.category === 'Physical' ? input.attackerStats?.atk : input.attackerStats?.spa) ?? 150;
-  const defStat = (move.category === 'Physical' ? def.baseStats.def : def.baseStats.spd) ?? 100;
+  const physical = move.category === 'Physical';
+  const offStat = ((physical ? input.attackerStats?.atk : input.attackerStats?.spa) ?? 150)
+    * boostMultiplier(input.attackerBoosts?.[physical ? 'atk' : 'spa'] ?? 0);
+  const defStat = ((physical
+    ? input.defenderStats?.def ?? def.baseStats.def
+    : input.defenderStats?.spd ?? def.baseStats.spd) ?? 100)
+    * boostMultiplier(input.defenderBoosts?.[physical ? 'def' : 'spd'] ?? 0);
   const spread = input.isSpread ? 0.75 : 1;
   const weather = weatherModifier(input.weather, moveType);
   const raw = power * (offStat / 150) * eff * stab * spread * weather;
@@ -190,9 +215,14 @@ export function hpScaledBasePower(dex: DexData, moveId: string, hpPercent: numbe
   return Math.floor((move.basePower * hp) / 100);
 }
 
+/** 满投资中性性格能力值近似（L50，非 HP）：floor((2*base+94)/2)+5 = base+52；对手未知实际数值时的估算口径 */
+export function neutralStatTier(base: number): number {
+  return Math.floor((2 * base + 94) / 2) + 5;
+}
+
 /** 满投资中性性格速度档位（L50）：floor(floor((2*base+94)*0.5)+5)，与 speedtiers 实测一致 */
 export function neutralSpeedTier(baseSpeed: number): number {
-  return Math.floor((2 * baseSpeed + 94) / 2) + 5;
+  return neutralStatTier(baseSpeed);
 }
 
 function weatherModifier(weather: string | undefined, moveType: string): number {

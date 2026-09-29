@@ -14,6 +14,7 @@ import type {BattleState} from '../state/tracker.js';
 import {resolveKey} from './answers.js';
 import {fallbackActions, type FallbackContext} from './fallback.js';
 import {buildSwitchPlans} from './force-switch.js';
+import {applyPreviewDirectives, collectTurnDirectives} from './hard-directives.js';
 import {buildPreviewQuestions, fullTeamOrder, resolvePreviewOrder} from './team-preview.js';
 import {buildTurnPlans, type SlotAction, type SlotQuestionPlan} from './turn.js';
 
@@ -245,10 +246,13 @@ async function runWithJev(
   ctx.onUsage?.(res.usage, 'jev');
   if (kind === 'team-preview') {
     const {order, adjusted} = resolvePreviewOrder(res.answers);
+    // 硬指令 H1/H6：场地手不连续首发（跨局状态）+ 对手天气时补入班基拉斯，覆盖模型的预览顺序
+    const preview = applyPreviewDirectives({dex: ctx.dex, request: ctx.request, order, opponentPreviewSpecies: opponentSpecies});
+    adjusted.push(...preview.notes);
     const missingCount = adjusted.filter(a => a.startsWith('missing:')).length;
     return {
       ...trace,
-      actions: [{kind: 'team', order: fullTeamOrder(order)}],
+      actions: [{kind: 'team', order: fullTeamOrder(preview.order)}],
       adjusted,
       replacedCount: order.length - missingCount,
       answers: res.answers,
@@ -270,6 +274,15 @@ async function runWithJev(
     if (!option) continue;
     if (resolved.adjusted) adjusted.push(`adjusted:${plan.questionName}: ${resolved.key}`);
     picks.push({slot: plan.slot, action: option.action, key: resolved.key, confidence: resolved.confidence});
+  }
+  // 硬指令 H2/H3/H4 优先于模型答案：只从既有合法选项中覆盖对应槽位
+  for (const directive of collectTurnDirectives({dex: ctx.dex, request: ctx.request, tracker: ctx.tracker, plans})) {
+    const option = plans.find(p => p.slot === directive.slot)?.options.find(o => o.key === directive.key);
+    if (!option) continue;
+    const existing = picks.findIndex(p => p.slot === directive.slot);
+    if (existing >= 0) picks.splice(existing, 1);
+    picks.push({slot: directive.slot, action: option.action, key: directive.key, confidence: 1});
+    adjusted.push(directive.note);
   }
   const merged = mergeBySlot(fallbackActions(ctx), picks);
   const deduped = dedupeSwitchTargets(merged.actions, plans, res.answers, adjusted);

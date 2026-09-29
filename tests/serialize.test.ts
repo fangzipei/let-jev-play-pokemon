@@ -156,6 +156,15 @@ describe('buildStatePayload', () => {
     expect(payload.sides.opponent.bench.find((p: any) => p.species === 'Victreebel').boosts).toEqual({});
     expect(payload.battle_context.summary.opponent.pokemon.find((p: any) => p.species === 'Victreebel').boosts).toEqual({});
   });
+  it('主快照带灭歌倒计时：我方与对手的在场成员各带各自的剩余回合', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-start|p1b: Chandelure|perish2|[silent]');
+    tracker.handleLine('|-start|p2a: Victreebel|perish1|[silent]');
+    const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
+    expect(payload.sides.ours.active.find((p: any) => p.species === 'Chandelure').perish).toBe(2);
+    expect(payload.sides.opponent.active.find((p: any) => p.species === 'Victreebel').perish).toBe(1);
+    expect(payload.sides.opponent.active.find((p: any) => p.species === 'Charizard')).not.toHaveProperty('perish');
+  });
   it('包含双方关键信息', () => {
     const payload = buildStatePayload({state: mkTracker().state, request: mkRequest(), dex}) as any;
     expect(payload.turn).toBe(1);
@@ -416,6 +425,13 @@ describe('describeSwitchOption', () => {
     expect(text).toContain('Rock/Dark');
     expect(text).toContain('175/175');
   });
+  it('无 analysis 时换人描述的来袭估算按我方实际防御值折算', () => {
+    const state = mkTracker().state;
+    state.sides.p2.pokemon[0].revealedMoves = ['Sludge Bomb'];
+    const request = mkRequest();
+    const text = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: opponentActives(dex, state)});
+    expect(text).toContain('incoming ≈20% from Victreebel');
+  });
   it('换出收益：Yawn 解除、低血保存、负面阶级清零，无收益时不添加', () => {
     const request = mkRequest();
     const base = {dex, pokemon: request.side.pokemon[2], opponentActives: []};
@@ -487,19 +503,59 @@ describe('主攻属性被降：换人强化行与招式估算偏差提醒', () =
     expect(other).toContain("lowered stats (atk -1)");
     expect(other).not.toContain('main special attacker');
   });
-  it('招式选项：主攻被降且类别匹配的伤害招追加估算偏差提醒；状态招与不匹配类别不加', () => {
+  it('招式选项：主攻被降且类别匹配的伤害招说明估算已含阶级并引导优先换人；状态招与不匹配类别不加', () => {
     const foe = {label: 'Foe A', species: 'Victreebel', hpPercent: 100};
     const base = {dex, moveId: 'shadowball', moveName: 'Shadow Ball', pp: 15, maxpp: 15, attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190}, target: foe};
     const hit = describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: -2}});
     expect(hit).toContain('Special Attack is at -2');
-    expect(hit).toMatch(/does not include stat stages/);
-    expect(hit).toMatch(/actual damage is lower/);
-    expect(describeMoveOption({...base, moveId: 'trickroom', moveName: 'Trick Room', attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/does not include stat stages/);
-    expect(describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head', attackerTypes: ['Bug', 'Steel'], attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/does not include stat stages/);
-    expect(describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: 0}})).not.toMatch(/does not include stat stages/);
+    expect(hit).toMatch(/already includes that stat stage/);
+    expect(hit).toMatch(/prioritize switching out/);
+    expect(describeMoveOption({...base, moveId: 'trickroom', moveName: 'Trick Room', attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/already includes that stat stage/);
+    expect(describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head', attackerTypes: ['Bug', 'Steel'], attackerMainAttack: {stat: 'spa', stage: -2}})).not.toMatch(/already includes that stat stage/);
+    expect(describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: 0}})).not.toMatch(/already includes that stat stage/);
     const atk = describeMoveOption({...base, moveId: 'ironhead', moveName: 'Iron Head', attackerTypes: ['Bug', 'Steel'], attackerMainAttack: {stat: 'atk', stage: -1}});
     expect(atk).toContain('Attack is at -1');
     expect(atk).toContain('about 67%');
+    // 估算本身也按当前阶级折算（spa -2 时约 35%）
+    expect(describeMoveOption({...base, attackerMainAttack: {stat: 'spa', stage: -2}, attackerBoosts: {spa: -2}})).toContain('≈35%');
+  });
+});
+
+describe('伤害估算应用场上能力阶级', () => {
+  const base = {dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15, attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}};
+  it('招式选项：攻方 -2 折半、守方 +2 增防都反映在当前估算里', () => {
+    const target = {label: 'Foe A', species: 'Victreebel', hpPercent: 100};
+    expect(describeMoveOption({...base, target})).toContain('≈69%');
+    expect(describeMoveOption({...base, target, attackerBoosts: {atk: -2}})).toContain('≈34%');
+    expect(describeMoveOption({...base, target: {...target, boosts: {def: 2}}})).toContain('≈42%');
+  });
+});
+
+describe('睡眠目标的机制解读', () => {
+  const base = {dex, moveId: 'sludgebomb', moveName: 'Sludge Bomb', pp: 10, maxpp: 10, attackerTypes: ['Poison'], attackerStats: {spa: 152}};
+  it('目标睡眠时标注睡眠机制并提示抓紧输出；其他状态不加', () => {
+    const asleep = describeMoveOption({...base, target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, status: 'slp'}});
+    expect(asleep).toContain('Victreebel is asleep');
+    expect(asleep).toMatch(/first action attempt always fails/);
+    expect(asleep).toMatch(/second attempt only succeeds 1\/3/);
+    expect(asleep).toMatch(/attack it now/);
+    expect(describeMoveOption({...base, target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100, status: 'psn'}})).not.toContain('is asleep');
+  });
+});
+
+describe('灭歌倒计时的换人解读', () => {
+  const base = {dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15, attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100}};
+  it('招式选项提醒优先轮换下场并预判对面保护拖回合', () => {
+    const label = describeMoveOption({...base, attackerPerish: 2});
+    expect(label).toContain('perish2');
+    expect(label).toMatch(/prioritize switching out/);
+    expect(label).toMatch(/expect the foe to use Protect/);
+    expect(describeMoveOption(base)).not.toContain('Perish Song countdown');
+  });
+  it('换人选项把换下重置倒计时列为换出收益', () => {
+    const request = mkRequest();
+    const label = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: [], outgoing: {species: 'Chandelure', perish: 2}});
+    expect(label).toContain('resets the Perish Song countdown on Chandelure (perish2)');
   });
 });
 

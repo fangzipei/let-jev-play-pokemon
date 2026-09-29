@@ -1,4 +1,5 @@
 import {loadConfig, type AppConfig} from '../config.js';
+import {resetHardDirectives} from '../decide/hard-directives.js';
 import {loadChamdbPriors} from '../dex/chamdb-priors.js';
 import {loadDex, type DexData} from '../dex/index.js';
 import {loadPikaMeta, pikaToPriors} from '../dex/pikalytics.js';
@@ -80,6 +81,8 @@ async function waitForBattle(
 /** 端到端编排：登录 → 搜索/挑战 → 每场决策 → 汇总 */
 export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
   const cfg = opts.cfg ?? loadConfig();
+  // 硬指令跨局状态（首发轮换）只在本场 runMatch 的多局之间累计
+  resetHardDirectives();
   const logger = opts.logger ?? createLogger({logDir: cfg.logDir, logLevel: cfg.logLevel});
   const dex = opts.dex ?? (await loadDex({fetchImpl: opts.fetchImpl}));
   const jev = mkJevClient(cfg, logger, opts.fetchImpl);

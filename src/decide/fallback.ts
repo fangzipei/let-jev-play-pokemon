@@ -104,6 +104,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
           const pct = estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
             attackerAbility: me.ability ?? me.baseAbility,
+            attackerBoosts: tracked?.boosts, defenderBoosts: foe.boosts,
             defenderSpecies: foe.species, isSpread: spreadHits, weather,
           }) ?? 0;
           score = Math.max(score, pct);
@@ -113,6 +114,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
           const pct = estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
             attackerAbility: me.ability ?? me.baseAbility,
+            attackerBoosts: tracked?.boosts, defenderBoosts: foes[fi].boosts,
             defenderSpecies: foes[fi].species, weather,
           }) ?? 0;
           if (pct > score) {
@@ -128,6 +130,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
           ? estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
             attackerAbility: me.ability ?? me.baseAbility,
+            attackerBoosts: tracked?.boosts, defenderBoosts: foe.boosts,
             defenderSpecies: foe.species, weather,
           }) ?? 0
           : 0;

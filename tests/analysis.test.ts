@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {buildAnalysisContext} from '../src/state/analysis.js';
+import {buildAnalysisContext, DAMAGE_CAVEAT, estimateRevealedIncoming} from '../src/state/analysis.js';
 import {mkDex, mkRequest, mkTracker} from './helpers.js';
 
 function setup() {
@@ -252,6 +252,29 @@ describe('buildAnalysisContext 条件化角色', () => {
     expect(notes).toMatch(/overwrite a foe's weather/i);
     expect(notes).toMatch(/Sand Rush.*double speed/i);
   });
+  it('沙暴手带 Mega 石时注明形态变化会再次触发沙暴覆盖天气', () => {
+    const input = sixTeam();
+    input.dex.species.tyranitarmega = {
+      name: 'Tyranitar-Mega', types: ['Rock', 'Dark'],
+      baseStats: {hp: 100, atk: 164, def: 150, spa: 95, spd: 120, spe: 71},
+      abilities: {0: 'Sand Stream'}, baseSpecies: 'Tyranitar', requiredItem: 'Tyranitarite',
+    };
+    input.request.side.pokemon[2].item = 'tyranitarite';
+    const notes = buildAnalysisContext(input).teamNotes[2].notes.join(' ');
+    expect(notes).toMatch(/Mega Evolving.*re-activates Sand Stream/i);
+    expect(notes).toMatch(/setting sandstorm again/i);
+    expect(notes).toMatch(/overwrit/i);
+  });
+  it('沙暴手不带 Mega 石时不注明 Mega 触发', () => {
+    const input = sixTeam();
+    input.dex.species.tyranitarmega = {
+      name: 'Tyranitar-Mega', types: ['Rock', 'Dark'],
+      baseStats: {hp: 100, atk: 164, def: 150, spa: 95, spd: 120, spe: 71},
+      abilities: {0: 'Sand Stream'}, baseSpecies: 'Tyranitar', requiredItem: 'Tyranitarite',
+    };
+    const notes = buildAnalysisContext(input).teamNotes[2].notes.join(' ');
+    expect(notes).not.toMatch(/Mega Evolving/i);
+  });
   it('场地争夺：精神场地可被对手替换、重入场可抢回，并关联 Expanding Force 收益', () => {
     const input = setup();
     input.dex.species.indeedee = {name: 'Indeedee', types: ['Psychic', 'Normal'], baseStats: {hp: 60, atk: 65, def: 55, spa: 105, spd: 95, spe: 85}, abilities: {0: 'Psychic Surge'}};
@@ -482,5 +505,79 @@ describe('buildAnalysisContext 新增条件注解（Reg M-C 热点）', () => {
     const input = setup(); // 默认队伍含 suckerpunch（priority>0）与 heatwave（spread），会触发 Quick/Wide Guard，但不含下列
     const notes = buildAnalysisContext(input).teamNotes.map(n => n.notes.join(' ')).join(' ');
     expect(notes).not.toMatch(/Fake Out|Perish Song|Aurora Veil|Tailwind/);
+  });
+});
+
+describe('estimateRevealedIncoming 按当前形态的能力值折算', () => {
+  it('相同招式与克制条件下来袭估算随对手攻击值缩放，不再一律按 150 只算威力', () => {
+    const dex = mkDex();
+    const weak = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure',
+      foe: {species: 'Whimsicott', revealedMoves: ['rockslide']}});
+    const strong = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure',
+      foe: {species: 'Gyarados', revealedMoves: ['rockslide']}});
+    expect(weak.roughPercent).toBe(46);
+    expect(strong.roughPercent).toBe(68);
+  });
+  it('对手当前形态决定能力值：未 Mega 按基础形态，已 Mega 按 Mega 形态', () => {
+    const dex = mkDex();
+    dex.species.gyaradosmega = {name: 'Gyarados-Mega', types: ['Water', 'Dark'],
+      baseStats: {hp: 95, atk: 155, def: 109, spa: 70, spd: 130, spe: 81},
+      abilities: {0: 'Mold Breaker'}, baseSpecies: 'Gyarados', requiredItem: 'Gyaradosite'};
+    const notMega = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure',
+      foe: {species: 'Gyarados', revealedMoves: ['rockslide']}});
+    const mega = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure',
+      foe: {species: 'Gyarados-Mega', revealedMoves: ['rockslide']}});
+    expect(notMega.roughPercent).toBe(68);
+    expect(mega.roughPercent).toBe(80);
+  });
+});
+
+describe('来袭估算的防守侧：我方实际抗性与防御数值', () => {
+  it('相同对手与招式下，我方防御能力值越高估算越低', () => {
+    const dex = mkDex();
+    const foe = {species: 'Gyarados', revealedMoves: ['rockslide']};
+    const frail = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure', defenderStats: {def: 110, spd: 110}, foe});
+    const bulky = estimateRevealedIncoming({dex, defenderSpecies: 'Chandelure', defenderStats: {def: 200, spd: 110}, foe});
+    expect(frail.roughPercent).toBe(59);
+    expect(bulky.roughPercent).toBe(37);
+  });
+  it('buildAnalysisContext 的来袭估算按 request 实际 spd 折减，并随请求数值变化', () => {
+    const input = setup();
+    input.state.sides.p2.pokemon[0].revealedMoves = ['Sludge Bomb'];
+    const incoming = () => buildAnalysisContext(input).threats[1].incoming.find(i => i.foeSpecies === 'Victreebel')!.roughPercent;
+    expect(incoming()).toBe(23);
+    input.request.side.pokemon[1].stats!.spd = 160;
+    expect(incoming()).toBe(17);
+  });
+  it('口径说明不再声称忽略真实防御数值，并说明已应用已知阶级', () => {
+    expect(DAMAGE_CAVEAT).toContain('not a calibrated actual HP% prediction');
+    expect(DAMAGE_CAVEAT).not.toContain('ignores real defensive stats');
+    expect(DAMAGE_CAVEAT).not.toContain('ignores boosts');
+    expect(DAMAGE_CAVEAT).toContain('applies known stat stages');
+  });
+});
+
+describe('来袭与输出估算考虑场上能力阶级', () => {
+  it('对手攻击阶级放大、我方防御阶级缩小来袭估算', () => {
+    const dex = mkDex();
+    const base = {dex, defenderSpecies: 'Chandelure', foe: {species: 'Gyarados', revealedMoves: ['rockslide']}};
+    expect(estimateRevealedIncoming(base).roughPercent).toBe(68);
+    expect(estimateRevealedIncoming({...base, foe: {...base.foe, boosts: {atk: 2}}}).roughPercent).toBe(136);
+    expect(estimateRevealedIncoming({...base, defenderBoosts: {def: 2}}).roughPercent).toBe(40);
+  });
+  it('buildAnalysisContext 按 tracker 当前阶级折算来袭与输出估算', () => {
+    const input = setup();
+    input.state.sides.p2.pokemon[0].revealedMoves = ['Sludge Bomb'];
+    const incoming = () => buildAnalysisContext(input).threats[1].incoming.find(i => i.foeSpecies === 'Victreebel')!.roughPercent;
+    expect(incoming()).toBe(23);
+    input.state.sides.p2.pokemon[0].boosts = {spa: 2};
+    expect(incoming()).toBe(46);
+    input.state.sides.p2.pokemon[0].boosts = {};
+    const outgoing = () => buildAnalysisContext(input).threats[1].outgoing.find(o => o.foeSpecies === 'Victreebel' && o.move === 'Heat Wave')!.damage_percent;
+    expect(outgoing()).toBe(123);
+    input.state.sides.p1.pokemon[1].boosts = {spa: -2};
+    expect(outgoing()).toBe(62);
+    input.state.sides.p1.pokemon[1].boosts = {spd: 2};
+    expect(incoming()).toBe(13);
   });
 });

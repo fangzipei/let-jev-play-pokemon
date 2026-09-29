@@ -123,6 +123,20 @@ describe('speedControlText', () => {
     expect(speedControlText(mkTracker().state, 'p1')).toBeNull();
   });
 
+  it('我方顺风激活时引导窗口内全员输出而非保护或换人', () => {
+    const text = speedControlText(withControls().state, 'p1');
+    expect(text).toContain('Your-side Tailwind is active with 3 more turns including this one');
+    expect(text).toMatch(/prefer attacking with every slot/i);
+  });
+
+  it('仅对手顺风时不注入我方输出引导', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|-sidestart|p2: opponent|move: Tailwind');
+    const text = speedControlText(tracker.state, 'p1');
+    expect(text).toContain('Foe-side Tailwind is active with 4 more turns including this one');
+    expect(text).not.toMatch(/attack with every slot/i);
+  });
+
   it('对手速度特性警告并入文本', () => {
     const tracker = withControls();
     tracker.handleLine('|-ability|p2a: Victreebel|Chlorophyll');

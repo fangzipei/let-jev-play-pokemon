@@ -5,6 +5,7 @@ import type {MemoryData} from '../learn/store.js';
 import type {BattleRequest} from '../state/request.js';
 import type {AnalysisContext} from '../state/analysis.js';
 import {expectedFoeLeadLines, expectedFoeLeads, likelyMegaForm, speciesRecordLines, SPREAD_MOVE_CONDITION, topCoreLine} from '../state/opponent-notes.js';
+import {hasEntryWeatherSetter} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {describePreviewCandidate, isMegaCapable, type LikelyMegaFoe, type PreviewLeadIntel} from '../state/serialize.js';
 import {resolveKey} from './answers.js';
@@ -93,6 +94,14 @@ export function buildPreviewQuestions(input: {
     : megaHolders === 1
       ? ' Your team has one Mega-capable Pokemon; include it in your four so you keep the option to Mega Evolve.'
       : '';
+  // 对手预览自带入场天气时：提示用我方天气手覆盖（不必是 Mega 进化者），优先级高于 one-Mega 指导
+  const foeWeatherSetters = input.opponentPreviewSpecies.filter(species => hasEntryWeatherSetter(input.dex, species));
+  const ourWeatherSetters = input.request.side.pokemon
+    .map(pokemon => pokemon.details.split(',')[0]?.trim() || pokemon.ident.split(':')[1]?.trim() || '')
+    .filter(species => species && hasEntryWeatherSetter(input.dex, species));
+  const weatherAdvice = foeWeatherSetters.length && ourWeatherSetters.length
+    ? ` The foe preview can set weather on entry (${foeWeatherSetters.join(', ')}); bring ${ourWeatherSetters.join(' or ')} to overwrite it with your own entry weather - that takes priority over the one-Mega guideline above, and the weather setter does not need to be the Pokemon that Mega Evolves.`
+    : '';
   // 预期首发段与逐槽经验段同源：先验与经验库各自标注来源；两来源皆缺时不输出经验段
   const leadLines = expectedFoeLeadLines(foeLeads);
   const records = level2 ? speciesRecordLines(input.memory, foeLeads.map(lead => lead.species), {dex: input.dex}) : [];
@@ -123,7 +132,7 @@ export function buildPreviewQuestions(input: {
     ? " Check each slot's likely-form coverage: when it lists a probable Mega form, favor that attacker and vary your lead pair instead of repeating a default combination."
     : '';
   const intro = INTRO + (input.analysis && input.analysis.level >= 2
-    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game. A support or terrain setter earns a lead slot only when its entry effect or matchup answers the opponent\'s likely opening, not out of habit.' + coverageAdvice + megaAdvice + leadIntelText + spreadAdvice : '');
+    ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game. A support or terrain setter earns a lead slot only when its entry effect or matchup answers the opponent\'s likely opening, not out of habit.' + coverageAdvice + megaAdvice + weatherAdvice + leadIntelText + spreadAdvice : '');
   const instructions: Record<string, string> = {
     lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
     lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,

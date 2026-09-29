@@ -18,6 +18,8 @@ export interface OpponentActive {
   revealedMoves: string[];
   /** 已揭示特性（来袭伤害估算中的 Adaptability 等修正） */
   ability?: string | null;
+  /** 在场对手的当前能力阶级（伤害估算按当前值折算） */
+  boosts?: Record<string, number>;
 }
 
 /** 对手场上宝可梦，按参战位置排序：index 0 对应 TARGETSPEC `+1`，index 1 对应 `+2` */
@@ -37,6 +39,7 @@ export function opponentActives(dex: DexData, state: BattleState): OpponentActiv
       status: p.fainted ? 'fnt' : p.status,
       revealedMoves: p.revealedMoves,
       ability: p.ability ?? null,
+      boosts: p.boosts,
     }));
 }
 
@@ -90,6 +93,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
       item: p.item ?? null, ability: p.ability ?? null, base_ability: p.baseAbility ?? null,
       moves: p.moves ?? null, stats: p.stats ?? null, types: speciesTypes(dex, speciesOf(p)),
       boosts: p.active ? tracked?.boosts ?? {} : {},
+      ...(p.active && tracked?.perish !== undefined ? {perish: tracked.perish} : {}),
       volatiles: p.active ? tracked?.volatiles ?? [] : [], single_turn: p.active ? tracked?.singleTurn ?? [] : [],
       ...(p.active ? {move_request: request.active?.[active.indexOf(p)]?.moves ?? null} : {}),
       ...(analysis ? {...speedFields(analysis.ourSpeeds.find(s => s.slot === slot)),
@@ -113,6 +117,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     return {
       ident: p.ident, species: p.species, active_position: p.activePos, seen_in_battle: seen,
       hp_percent: seen ? p.hpPercent : null, status: seen ? p.status : null,
+      ...(p.perish !== undefined ? {perish: p.perish} : {}),
       types: speciesTypes(dex, p.species), boosts: p.activePos >= 0 && !p.fainted ? p.boosts : {}, revealed_moves: p.revealedMoves,
       item_revealed: p.consumedItem ? null : p.item ?? null, ability_revealed: p.ability ?? null,
       item_consumed: p.consumedItem ?? false, volatiles: p.volatiles, single_turn: p.singleTurn,
@@ -159,11 +164,13 @@ export interface MoveOptionInput {
   maxpp: number;
   attackerTypes: string[];
   attackerStats?: Record<string, number>;
+  /** 攻击方当前能力阶级（atk/spa）：已知时伤害估算按当前值折算 */
+  attackerBoosts?: Record<string, number>;
   /** 攻击方当前特性（Adaptability 等本系加成修正） */
   attackerAbility?: string;
-  target?: {label: string; species: string; hpPercent: number; ident?: string};
+  target?: {label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>};
   /** 群攻招式的每个目标：为每个对手各出一条伤害估算（单目标招式沿用 target） */
-  targets?: Array<{label: string; species: string; hpPercent: number; ident?: string}>;
+  targets?: Array<{label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>}>;
   analysis?: AnalysisContext;
   attackerSlot?: number;
   hitsBoth?: boolean;
@@ -182,8 +189,10 @@ export interface MoveOptionInput {
   attackerItem?: string;
   /** 对手本场是否已用掉 Mega 进化（true 时不再提示目标 Mega 免疫风险） */
   opponentMegaUsed?: boolean;
-  /** 使用者主攻属性与当前阶级：主攻被降且本招类别匹配时，提醒伤害估算未包含能力阶级 */
+  /** 使用者主攻属性与当前阶级：主攻被降且本招类别匹配时，引导换人重置降幅 */
   attackerMainAttack?: {stat: 'spa' | 'atk'; stage: number};
+  /** 使用者当前的灭歌倒计时剩余回合（perishN 的 N）：写入换人提醒 */
+  attackerPerish?: number;
   /** 我方未倒下成员（含替补）的速度估计与在场标记：供 Trick Room 收益注解统计慢速成员 */
   ourLiveSpeeds?: Array<{species: string; speed: number; active: boolean}>;
   /** 在场对手 ident 列表：无目标招式（自身招式）的速度线结论只覆盖这些对手，避免列入未上场替补；缺省时退回全部已见对手 */
@@ -465,11 +474,16 @@ export function describeMoveOption(input: MoveOptionInput): string {
         const pct = estimateDamagePercent({
           dex: input.dex, moveId: input.moveId, attackerTypes: input.attackerTypes,
           attackerStats: input.attackerStats, attackerAbility: input.attackerAbility,
+          attackerBoosts: input.attackerBoosts, defenderBoosts: target.boosts,
           defenderSpecies: target.species,
           isSpread: spreadPenalty, weather: input.weather, powerOverride: lastRespectsPower(input) ?? hpScaledPower(input),
         });
         const eff = effectiveness(input.dex, type, speciesTypes(input.dex, target.species));
         extras.push(`vs ${target.label} (${target.species}, ${target.hpPercent}% HP): ≈${pct ?? '?'}% damage${eff !== 1 ? ` (${eff}x)` : ''}`);
+        // 对手睡眠：第一次行动必失败、第二次只有 1/3 机会醒来——现在是放心输出的窗口
+        if (target.status === 'slp') {
+          extras.push(`${target.species} is asleep: its first action attempt always fails and the second attempt only succeeds 1/3 of the time — attack it now while it cannot respond`);
+        }
         if (input.opponentMegaUsed !== true) {
           const warning = megaImmunityWarning(input.dex, target.species, type);
           if (warning) extras.push(warning);
@@ -484,11 +498,15 @@ export function describeMoveOption(input: MoveOptionInput): string {
     extras.push('(damage unknown: missing move data or variable power)');
   }
   const main = input.attackerMainAttack;
-  // 主攻属性被降时伤害估算不含阶级会高估；仅对与该属性匹配的伤害招明确提醒
+  // 主攻属性被降时引导换人重置；估算已按当前阶级折算，不再提示偏差
   if (move && move.basePower > 0 && main && main.stage <= -1
     && (main.stat === 'spa' ? move.category === 'Special' : move.category === 'Physical')) {
     const label = main.stat === 'spa' ? 'Special Attack' : 'Attack';
-    extras.push(`(the attacker's ${label} is at ${main.stage} (about ${Math.round(200 / (2 - main.stage))}% of its usual output); this estimate does not include stat stages, so actual damage is lower)`);
+    extras.push(`(the attacker's ${label} is at ${main.stage} (about ${Math.round(200 / (2 - main.stage))}% of its usual output); this estimate already includes that stat stage, so prioritize switching out to reset the drop)`);
+  }
+  // 灭歌倒计时：只有换下能重置；倒计时回合内对手会用保护拖时间
+  if (input.attackerPerish !== undefined) {
+    extras.push(`(Perish Song countdown (perish${input.attackerPerish}) is on this Pokemon: only switching out resets it — prioritize switching out this turn, and expect the foe to use Protect to stall the remaining countdown turns)`);
   }
   if (move && move.category !== 'Status') extras.push(`(${DAMAGE_CAVEAT})`);
   const speedOrder = speedOrderNotes(input);
@@ -525,6 +543,8 @@ export function describeSwitchOption(input: {
   weather?: string;
   /** 当前槽位在场者的状态：换出收益注解（自愿换人时传入；强制换人时无意义） */
   outgoing?: {species: string; yawning?: boolean; hpPercent?: number; boosts?: Record<string, number>;
+    /** 灭歌倒计时剩余回合（perishN 的 N）：换下即可重置 */
+    perish?: number;
     /** 主攻属性与当前阶级：主攻被降时给"优先考虑换人"强化行（通用阶级行不再重复该项） */
     mainAttack?: {stat: 'spa' | 'atk'; stage: number}};
 }): string {
@@ -538,6 +558,7 @@ export function describeSwitchOption(input: {
   if (input.outgoing) {
     const o = input.outgoing;
     if (o.yawning) outgoingNotes.push(`switching this slot out removes Yawn from ${o.species} before it falls asleep`);
+    if (o.perish !== undefined) outgoingNotes.push(`switching this slot out resets the Perish Song countdown on ${o.species} (perish${o.perish}), saving it from fainting when the countdown reaches zero`);
     if (o.hpPercent !== undefined && o.hpPercent <= 33) outgoingNotes.push(`${o.species} is at ${o.hpPercent}% HP: switching preserves it`);
     const mainWeakened = o.mainAttack !== undefined && o.mainAttack.stage <= -1;
     const drops = Object.entries(o.boosts ?? {})
@@ -553,7 +574,7 @@ export function describeSwitchOption(input: {
   }
   const incoming = input.analysis
     ? input.analysis.threats.find(t => input.teamSlot === undefined ? t.ident === input.pokemon.ident : t.slot === input.teamSlot)?.incoming ?? []
-    : input.opponentActives.map(foe => estimateRevealedIncoming({dex: input.dex, defenderSpecies: species, weather: input.weather, foe}));
+    : input.opponentActives.map(foe => estimateRevealedIncoming({dex: input.dex, defenderSpecies: species, defenderStats: input.pokemon.stats, weather: input.weather, foe}));
   const risks = incoming.map(i => `incoming ${i.roughPercent === null ? 'unknown' : `≈${i.roughPercent}%`} from ${i.foeSpecies} (revealed moves only${i.unknownMoves.length ? `; unknown: ${i.unknownMoves.join(', ')}` : ''})`);
   // 手动换人必须提醒代价：换入者本回合不能行动，会先吃打向该槽位的攻击（可能少血甚至被击倒）
   const manualCost = input.forced ? [] : ['the switch-in cannot act this turn and will take any attacks aimed at this slot'];

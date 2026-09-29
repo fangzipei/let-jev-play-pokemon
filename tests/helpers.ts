@@ -92,6 +92,18 @@ export function mkTracker(ourName = 'JevBot1234'): BattleTracker {
   return tracker;
 }
 
+/** 用给定协议行构造对战（我方 JevBot1234 / p1，对手 p2）；调用方在 lines 里自行提供 poke/switch/turn 等 */
+export function mkTrackerWithLines(lines: string[], battleId = 'battle-hard-1'): BattleTracker {
+  const tracker = new BattleTracker(battleId, 'JevBot1234');
+  for (const line of [
+    '|player|p1|JevBot1234|1|1500',
+    '|player|p2|opponent|2|1500',
+    '|gametype|doubles',
+    ...lines,
+  ]) tracker.handleLine(line);
+  return tracker;
+}
+
 /** 测试用小型 dex（覆盖本队伍与常见对手） */
 export function mkDex(): DexData {
   const species: Record<string, any> = {
