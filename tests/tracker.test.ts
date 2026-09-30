@@ -147,6 +147,23 @@ describe('BattleTracker', () => {
     expect(t.state.sides.p2.megaUsed).toBe(true);
   });
 
+  it('临时形态变化（-formechange）更新物种，且不误标 Mega', () => {
+    const t = mkTrackerWithLines([
+      '|poke|p2|Aegislash, L50, M|',
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Aegislash|Aegislash, L50, M|100/100',
+      '|turn|1',
+      // 真实协议里临时形态变化带连字符；Aegislash 的形态切换与 Mega 无关
+      '|-formechange|p2a: Aegislash|Aegislash-Blade, L50, M|[from] ability: Stance Change',
+      '|move|p2a: Aegislash|Iron Head|p1a: Chandelure',
+      '|-damage|p1a: Chandelure|90/135',
+    ]);
+    const aegislash = t.state.sides.p2.pokemon.find(p => p.name === 'Aegislash')!;
+    expect(aegislash.species).toBe('Aegislash-Blade');
+    expect(aegislash.mega).toBe(false);
+    expect(t.state.sides.p2.megaUsed).toBe(false);
+  });
+
   it('血量/状态/濒死/后缀血量', () => {
     const t = feed(replay, 'TestBot');
     const corviknight = t.state.sides.p1.pokemon.find(p => p.name === 'Corviknight')!;
@@ -162,6 +179,77 @@ describe('BattleTracker', () => {
     const t = feed(replay, 'TestBot');
     const corviknight = t.state.sides.p1.pokemon.find(p => p.name === 'Corviknight')!;
     expect(corviknight.boosts.def).toBe(4);
+  });
+
+  it('-swapboost 交换指定能力阶级（Power Swap 只换 atk/spa，其余保留）', () => {
+    const t = mkTrackerWithLines([
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-boost|p1a: Chandelure|spa|2',
+      '|-boost|p1a: Chandelure|def|1',
+      '|-unboost|p2a: Victreebel|spa|1',
+      '|-boost|p2a: Victreebel|atk|3',
+      '|-swapboost|p1a: Chandelure|p2a: Victreebel|atk, spa|[from] move: Power Swap',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    const victreebel = t.findPokemon('p2', 'Victreebel')!;
+    expect(chandelure.boosts.atk).toBe(3);
+    expect(chandelure.boosts.spa).toBe(-1);
+    expect(victreebel.boosts.atk).toBe(0);
+    expect(victreebel.boosts.spa).toBe(2);
+    expect(chandelure.boosts.def).toBe(1);
+  });
+
+  it('-swapboost 缺省 stats 参数时交换全部阶级（Heart Swap）', () => {
+    const t = mkTrackerWithLines([
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-boost|p1a: Chandelure|def|2',
+      '|-boost|p2a: Victreebel|spe|1',
+      '|-boost|p2a: Victreebel|accuracy|1',
+      '|-swapboost|p1a: Chandelure|p2a: Victreebel|[from] move: Heart Swap',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    const victreebel = t.findPokemon('p2', 'Victreebel')!;
+    expect(chandelure.boosts.def).toBe(0);
+    expect(chandelure.boosts.spe).toBe(1);
+    expect(chandelure.boosts.accuracy).toBe(1);
+    expect(victreebel.boosts.def).toBe(2);
+    expect(victreebel.boosts.spe).toBe(0);
+  });
+
+  it('-copyboost 复制方获得数据源全部七项阶级并覆盖原值（Psych Up，数据源不改动）', () => {
+    const t = mkTrackerWithLines([
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-boost|p1a: Chandelure|def|1',
+      '|-boost|p2a: Victreebel|spa|2',
+      '|-unboost|p2a: Victreebel|atk|1',
+      '|-copyboost|p1a: Chandelure|p2a: Victreebel|[from] move: Psych Up',
+    ]);
+    const chandelure = t.findPokemon('p1', 'Chandelure')!;
+    const victreebel = t.findPokemon('p2', 'Victreebel')!;
+    expect(chandelure.boosts.spa).toBe(2);
+    expect(chandelure.boosts.atk).toBe(-1);
+    expect(chandelure.boosts.def).toBe(0);
+    expect(victreebel.boosts).toEqual({spa: 2, atk: -1});
+  });
+
+  it('-clearpositiveboost 只清正值保留负值（Spectral Thief）', () => {
+    const t = mkTrackerWithLines([
+      '|switch|p1a: Chandelure|Chandelure, L50, F|135/135',
+      '|switch|p2a: Victreebel|Victreebel, L50, M|100/100',
+      '|turn|1',
+      '|-boost|p2a: Victreebel|spa|2',
+      '|-unboost|p2a: Victreebel|atk|1',
+      '|-clearpositiveboost|p2a: Victreebel|p1a: Chandelure|move: Spectral Thief',
+    ]);
+    const victreebel = t.findPokemon('p2', 'Victreebel')!;
+    expect(victreebel.boosts.spa).toBe(0);
+    expect(victreebel.boosts.atk).toBe(-1);
   });
 
   it('灭歌倒计时按服务端最新值替换且不写入 volatiles', () => {

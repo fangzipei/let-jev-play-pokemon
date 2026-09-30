@@ -131,6 +131,26 @@ describe('estimateDamagePercent', () => {
     const offType = estimateDamagePercent({...base, moveId: 'drillrun'})!;
     expect(estimateDamagePercent({...base, moveId: 'drillrun', attackerAbility: 'adaptability'})).toBe(offType);
   });
+  it('灼伤使物理伤害估算减半，特殊招式不受影响', () => {
+    const physical = {dex, moveId: 'ironhead', attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, defenderSpecies: 'Victreebel'};
+    expect(estimateDamagePercent(physical)).toBe(69);
+    expect(estimateDamagePercent({...physical, attackerStatus: 'brn'})).toBe(34);
+    const special = {dex, moveId: 'shadowball', attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190}, defenderSpecies: 'Victreebel'};
+    expect(estimateDamagePercent({...special, attackerStatus: 'brn'})).toBe(estimateDamagePercent(special));
+  });
+  it('Guts 特性：豁免灼伤减半且带状态时攻击值 ×1.5（PS onModifyAtk），无状态不触发', () => {
+    const base = {dex, moveId: 'ironhead', attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, defenderSpecies: 'Victreebel'};
+    expect(estimateDamagePercent({...base, attackerAbility: 'guts'})).toBe(69);
+    expect(estimateDamagePercent({...base, attackerStatus: 'brn', attackerAbility: 'guts'})).toBe(103);
+    expect(estimateDamagePercent({...base, attackerStatus: 'par', attackerAbility: 'guts'})).toBe(103);
+  });
+  it('Facade 在非睡眠异常状态下威力翻倍且免受灼伤减半，睡眠时不翻倍', () => {
+    const base = {dex, moveId: 'facade', attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, defenderSpecies: 'Victreebel'};
+    expect(estimateDamagePercent(base)).toBe(40);
+    expect(estimateDamagePercent({...base, attackerStatus: 'brn'})).toBe(80);
+    expect(estimateDamagePercent({...base, attackerStatus: 'par'})).toBe(80);
+    expect(estimateDamagePercent({...base, attackerStatus: 'slp'})).toBe(40);
+  });
   it('未知物种返回 null', () => {
     expect(estimateDamagePercent({dex, moveId: 'thunderbolt', attackerTypes: ['Electric'], defenderSpecies: 'Missingno'})).toBeNull();
   });

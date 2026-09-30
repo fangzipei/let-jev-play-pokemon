@@ -195,17 +195,22 @@ async function runWithJev(
   const opponentNotes = level >= 2
     ? buildOpponentNotes({state: ctx.tracker.state, ourSideId, priors: ctx.priors, memory: ctx.memory, dex: ctx.dex})
     : undefined;
-  const state = structuredClone(buildStatePayload({state: ctx.tracker.state, request: ctx.request, dex: ctx.dex, analysis, opponentNotes}));
-  // 在第一次 await 之前固定本次请求的状态和合法选项；advisor 与 jev 使用同一份快照。
-  const plans = kind === 'team-preview' ? [] : kind === 'turn' ? buildTurnPlans({...ctx, analysis}) : buildSwitchPlans({...ctx, analysis});
+  // 选队问题与其批次简报先于 state 构建：简报随 state 只送一次，不在四个问题里各复制一遍。
   const opponentSpecies = previewOpponentSpecies(ctx.tracker.state);
-  let questions: Record<string, Question> = kind === 'team-preview' ? buildPreviewQuestions({
+  const previewSet = kind === 'team-preview' ? buildPreviewQuestions({
     dex: ctx.dex, request: ctx.request, analysis,
     opponentPreviewSpecies: opponentSpecies,
     memory: ctx.memory,
     opponentSpreadThreats: spreadThreatLines(ctx.priors, opponentSpecies),
     priors: ctx.priors,
-  }).questions : Object.fromEntries(plans.map(plan => [plan.questionName, plan.question]));
+  }) : null;
+  const state = structuredClone(buildStatePayload({
+    state: ctx.tracker.state, request: ctx.request, dex: ctx.dex, analysis, opponentNotes,
+    briefing: previewSet?.briefing,
+  }));
+  // 在第一次 await 之前固定本次请求的状态和合法选项；advisor 与 jev 使用同一份快照。
+  const plans = kind === 'team-preview' ? [] : kind === 'turn' ? buildTurnPlans({...ctx, analysis}) : buildSwitchPlans({...ctx, analysis});
+  let questions: Record<string, Question> = previewSet ? previewSet.questions : Object.fromEntries(plans.map(plan => [plan.questionName, plan.question]));
   if (!Object.keys(questions).length) throw new Error(`没有可提交给 jev 的 ${kind} 问题`);
   trace.state = state;
   trace.questions = questions;

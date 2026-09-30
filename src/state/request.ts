@@ -83,3 +83,9 @@ export function conditionPercent(condition: string): number {
 export function isFainted(condition: string): boolean {
   return /fnt/.test(condition);
 }
+
+/** 从 condition 里解析主要异常状态 id（如 "150/150 brn" → "brn"）；无状态时 undefined */
+export function conditionStatus(condition: string): string | undefined {
+  const m = /\b(brn|par|psn|tox|slp|frz)\b/i.exec(condition);
+  return m ? m[1]!.toLowerCase() : undefined;
+}

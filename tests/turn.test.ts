@@ -86,10 +86,14 @@ describe('三类构造器复用分析', () => {
     const request = mkRequest({teamPreview: true});
     const result = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard']});
     expect(Object.keys(result.questions)).toEqual([...PREVIEW_QUESTION_NAMES]);
+    // 批次共享的组合意图只出现在 briefing 里一次；逐题指令仍各自带整局目标与本题任务
+    expect(result.briefing).toMatch(/independent.*same batch/i);
+    expect(result.briefing).toMatch(/coherent.*four/i);
     for (const question of Object.values(result.questions)) {
-      expect(question.instructions).toMatch(/independent.*same batch/i);
-      expect(question.instructions).toMatch(/coherent.*four/i);
+      expect(question.instructions).toMatch(/win the entire battle/i);
+      expect(question.instructions).toContain('state.briefing');
       expect(question.instructions).not.toMatch(/already.chosen|already.picked|previous answer/i);
+      expect(question.instructions).not.toMatch(/independent.*same batch/i);
       expect(Object.keys((question as any).criteria)).toEqual(['slot_1', 'slot_2', 'slot_3', 'slot_4']);
     }
     expect(result.questions.lead_2.instructions).toMatch(/complementary partner/i);
@@ -103,8 +107,8 @@ describe('三类构造器复用分析', () => {
     const preview = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis});
     expect(preview.descriptionByKey.slot_1).toContain('estimated speed 321');
     expect(preview.descriptionByKey.slot_1).toContain('role: current request role marker');
-    expect(preview.questions.lead_1.instructions).toContain('Vary your leads');
-    expect(preview.questions.lead_1.instructions).toMatch(/earns a lead slot only when its entry effect or matchup/);
+    expect(preview.briefing).toContain('Vary your leads');
+    expect(preview.briefing).toMatch(/earns a lead slot only when its entry effect or matchup/);
     const plans = buildTurnPlans({dex, request, tracker, analysis});
     expect(plans[0].options.find(o => o.key === 'move_1_foe_a')?.label).toContain('estimated speed 321');
     const legacy = buildTurnPlans({dex, request, tracker});
@@ -183,14 +187,14 @@ describe('三类构造器复用分析', () => {
     const preview = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis});
     expect(preview.descriptionByKey.slot_1).toContain('estimated speed');
     expect(preview.descriptionByKey.slot_1).not.toContain('role:');
-    expect(preview.questions.lead_1.instructions).not.toContain('Vary your leads');
+    expect(preview.briefing).not.toContain('Vary your leads');
     const legacy = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard']});
     expect(legacy.descriptionByKey.slot_1).not.toContain('estimated speed');
   });
   it('L2 preview 引导 mega：两枚持有者要求每局恰带一只，零只与两只都否决，并给出对位都差时的取舍', () => {
     const request = mkRequest();
     const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
-    const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).questions.lead_1.instructions;
+    const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).briefing;
     expect(instructions).toMatch(/2 Mega-capable/i);
     expect(instructions).toMatch(/exactly one/i);
     expect(instructions).toMatch(/zero gives up your Mega/i);
@@ -202,14 +206,14 @@ describe('三类构造器复用分析', () => {
     single.side.pokemon[3].item = 'leftovers';
     const state = mkTracker().state;
     const l2 = buildAnalysisContext({dex, request: single, state, level: 2});
-    const l2Instructions = buildPreviewQuestions({dex, request: single, opponentPreviewSpecies: ['Charizard'], analysis: l2}).questions.bring_4.instructions;
+    const l2Instructions = buildPreviewQuestions({dex, request: single, opponentPreviewSpecies: ['Charizard'], analysis: l2}).briefing;
     expect(l2Instructions).toMatch(/one Mega-capable/i);
     expect(l2Instructions).toMatch(/include it/i);
     expect(l2Instructions).toMatch(/leaving it out gives up your Mega/i);
     expect(l2Instructions).toMatch(/still bring it/i);
     const request = mkRequest();
     const l1 = buildAnalysisContext({dex, request, state, level: 1});
-    const l1Instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis: l1}).questions.lead_1.instructions;
+    const l1Instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis: l1}).briefing;
     expect(l1Instructions).not.toMatch(/Mega-capable/i);
   });
   it('L2 preview 天气引导：对手有天气手时优先带自家天气手覆盖，不限于 Mega 进化者', () => {
@@ -217,7 +221,7 @@ describe('三类构造器复用分析', () => {
     weatherDex.species.torkoal = {name: 'Torkoal', types: ['Fire'], baseStats: {hp: 70, atk: 85, def: 140, spa: 85, spd: 70, spe: 20}, abilities: {0: 'Drought'}};
     const request = mkRequest();
     const analysis = buildAnalysisContext({dex: weatherDex, request, state: mkTracker().state, level: 2});
-    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).questions.lead_1.instructions;
+    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).briefing;
     expect(instructions).toMatch(/set weather on entry.*Torkoal/i);
     expect(instructions).toMatch(/overwrite it with your own entry weather/i);
     expect(instructions).toMatch(/takes priority over the one-Mega guideline/i);
@@ -226,7 +230,7 @@ describe('三类构造器复用分析', () => {
   it('L2 preview 天气引导：对手无天气手时不输出该段', () => {
     const request = mkRequest();
     const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
-    const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).questions.lead_1.instructions;
+    const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).briefing;
     expect(instructions).not.toMatch(/set weather on entry/i);
   });
   it('L2 preview 天气引导：我方没有天气手时不输出该段', () => {
@@ -235,7 +239,7 @@ describe('三类构造器复用分析', () => {
     const request = mkRequest();
     request.side.pokemon[2].details = 'Golisopod, L50, M';
     const analysis = buildAnalysisContext({dex: weatherDex, request, state: mkTracker().state, level: 2});
-    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).questions.lead_1.instructions;
+    const instructions = buildPreviewQuestions({dex: weatherDex, request, opponentPreviewSpecies: ['Torkoal'], analysis}).briefing;
     expect(instructions).not.toMatch(/set weather on entry/i);
   });
 });

@@ -227,6 +227,9 @@ export class BattleTracker {
         break;
       }
       case 'detailschange':
+      // 临时形态变化（Aegislash 形态切换、Morpeko、Cramorant 等）走带连字符的 -formechange；
+      // 漏掉这一项会让 p.species 停在旧形态，连带 payload、possible_abilities 与防御端估算失真
+      case '-formechange':
       case 'formechange': {
         const ident = parseIdent(a0);
         const p = ident && this.findPokemon(ident.side, ident.name);
@@ -330,6 +333,43 @@ export class BattleTracker {
       }
       case '-clearallboost': {
         for (const side of Object.values(s.sides)) for (const p of side.pokemon) p.boosts = {};
+        break;
+      }
+      case '-swapboost': {
+        // |-swapboost|A|B|[stats]|...：A、B 互换指定能力阶级（Guard Swap=def,spd、Power Swap=atk,spa）；
+        // 缺省 stats 参数时全部七项互换（Heart Swap）
+        const left = parseIdent(a0);
+        const right = parseIdent(a1);
+        const pLeft = left && this.findPokemon(left.side, left.name);
+        const pRight = right && this.findPokemon(right.side, right.name);
+        if (!pLeft || !pRight) break;
+        const stats = a2 && !a2.startsWith('[')
+          ? a2.split(',').map(v => v.trim()).filter(Boolean)
+          : ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion'];
+        for (const stat of stats) {
+          const held = pLeft.boosts[stat] ?? 0;
+          pLeft.boosts[stat] = pRight.boosts[stat] ?? 0;
+          pRight.boosts[stat] = held;
+        }
+        break;
+      }
+      case '-copyboost': {
+        // |-copyboost|A|B|...：A 复制 B 的全部七项阶级（Psych Up/Costar；PS 实现遍历对方完整表 → 全覆盖）
+        const target = parseIdent(a0);
+        const origin = parseIdent(a1);
+        const pTarget = target && this.findPokemon(target.side, target.name);
+        const pOrigin = origin && this.findPokemon(origin.side, origin.name);
+        if (!pTarget || !pOrigin) break;
+        for (const stat of ['atk', 'def', 'spa', 'spd', 'spe', 'accuracy', 'evasion']) {
+          pTarget.boosts[stat] = pOrigin.boosts[stat] ?? 0;
+        }
+        break;
+      }
+      case '-clearpositiveboost': {
+        // Spectral Thief 等：只清正值保留负值（与 -clearnegativeboost 镜像）
+        const ident = parseIdent(a0);
+        const p = ident && this.findPokemon(ident.side, ident.name);
+        if (p) for (const k of Object.keys(p.boosts)) if (p.boosts[k] > 0) p.boosts[k] = 0;
         break;
       }
       case '-weather': {

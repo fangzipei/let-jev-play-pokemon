@@ -74,14 +74,17 @@ async function main(): Promise<void> {
   for (const line of PROTOCOL_LINES) tracker.handleLine(line);
 
   const analysis = buildAnalysisContext({dex, state: tracker.state, request: REQUEST, level});
-  const payload = buildStatePayload({state: tracker.state, request: REQUEST, dex, analysis});
   const opponentPreviewSpecies = tracker.state.sides.p2?.pokemon.map(p => p.species) ?? [];
-  const {questions, descriptionByKey} = buildPreviewQuestions({dex, request: REQUEST, analysis, opponentPreviewSpecies});
+  const {questions, descriptionByKey, briefing} = buildPreviewQuestions({dex, request: REQUEST, analysis, opponentPreviewSpecies});
+  // 批次共享的选队上下文随 state 只送一次（briefing），不逐题重复
+  const payload = buildStatePayload({state: tracker.state, request: REQUEST, dex, analysis, briefing});
 
   console.log(`JEV_CONTEXT_LEVEL=${level}（stats 为离线示例值）`);
   console.log(`dex.source=${dex.source} species=${Object.keys(dex.species).length} moves=${Object.keys(dex.moves).length}`);
   console.log(`对手预览: ${opponentPreviewSpecies.join(' / ')}`);
-  console.log('\n== lead_1 指令（INTRO，jev 读到的完整开头）==');
+  console.log('\n== state.briefing（四个问题共享的选队上下文，只出现一次）==');
+  console.log(briefing);
+  console.log('\n== lead_1 指令（逐题：整局目标 + 本题任务）==');
   console.log(questions.lead_1?.instructions ?? '(缺失)');
   console.log('\n== 六个槽位的候选描述（choice criteria，jev 实际读到的文本）==');
   for (let slot = 1; slot <= 6; slot++) {
@@ -89,8 +92,8 @@ async function main(): Promise<void> {
   }
   console.log(`\n== team_notes（等级 ${level}，L1 为空属预期）==`);
   for (const note of analysis.teamNotes) console.log(`[${note.slot} ${note.species}] ${note.notes.join(' | ') || '(无注解)'}`);
-  const sample = (payload as {sides: {ours: {preview: unknown[]}}}).sides.ours.preview[0];
-  console.log('\n== 结构化 payload 采样 sides.ours.preview[0] ==');
+  const sample = (payload.sides as {ours: {active: unknown[]; bench: unknown[]}}).ours.bench[0];
+  console.log('\n== 结构化 payload 采样 sides.ours.bench[0] ==');
   console.log(JSON.stringify(sample, null, 2));
 }
 

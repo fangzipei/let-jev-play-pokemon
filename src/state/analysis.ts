@@ -1,5 +1,5 @@
 import type {DexData} from '../dex/index.js';
-import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
+import {activeEntries, conditionStatus, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import type {BattleState, PokemonState, SideState} from './tracker.js';
 import {entryWeatherOf, estimateDamagePercent, knownEffectiveness, neutralStatTier, superEffectivePhrase, weatherAdjustedType} from './calc.js';
 import {toId} from './protocol.js';
@@ -159,7 +159,7 @@ export function estimateRevealedIncoming(input: {
   /** 守方（我方）当前能力阶级（def/spd）：已知时按当前值折算承伤 */
   defenderBoosts?: Record<string, number>;
   weather?: string;
-  foe: {ident?: string; species: string; revealedMoves: string[]; ability?: string | null; boosts?: Record<string, number>};
+  foe: {ident?: string; species: string; revealedMoves: string[]; ability?: string | null; boosts?: Record<string, number>; status?: string | null};
 }): IncomingEstimate {
   const {dex, foe, defenderSpecies} = input;
   const attacker = dex.species[toId(foe.species)];
@@ -175,7 +175,7 @@ export function estimateRevealedIncoming(input: {
     if (move.category === 'Status') continue;
     const pct = attacker ? estimateDamagePercent({dex, moveId: id, attackerTypes: attacker.types, attackerStats, defenderSpecies,
       defenderStats: input.defenderStats, attackerBoosts: foe.boosts, defenderBoosts: input.defenderBoosts,
-      weather: input.weather, attackerAbility: foe.ability ?? undefined}) : null;
+      weather: input.weather, attackerAbility: foe.ability ?? undefined, attackerStatus: foe.status ?? undefined}) : null;
     if (pct === null) unknownMoves.push(id);
     else roughPercent = Math.max(roughPercent ?? 0, pct);
   }
@@ -360,7 +360,8 @@ export function buildAnalysisContext(input: AnalysisInput): AnalysisContext {
       // 与渲染层同源的伤害粗估：STAB、攻击值、当前能力阶级、克制、spread、天气全部计入
       const damage = move ? estimateDamagePercent({
         dex, moveId: id, attackerTypes: ourTypes, attackerStats: p.stats,
-        attackerAbility: p.ability ?? p.baseAbility, defenderSpecies: foe.species,
+        attackerAbility: p.ability ?? p.baseAbility, attackerStatus: conditionStatus(p.condition),
+        defenderSpecies: foe.species,
         attackerBoosts: trackedOur?.boosts, defenderBoosts: foe.boosts,
         isSpread: spreadPenaltyNow(move.target),
         weather: entryWeather,

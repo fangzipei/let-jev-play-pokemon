@@ -146,8 +146,10 @@ export interface DamageEstimateInput {
   attackerStats?: Record<string, number>;
   /** 攻击方当前能力阶级（atk/spa）：已知时按 PS 曲线折算实际输出 */
   attackerBoosts?: Record<string, number>;
-  /** 攻击方当前特性：Adaptability 把本系加成提到 2.0x；-ate 皮肤（Aerilate 等）转换一般系招式属性并加 1.2x 威力 */
+  /** 攻击方当前特性：Adaptability 把本系加成提到 2.0x；-ate 皮肤（Aerilate 等）转换一般系招式属性并加 1.2x 威力；Guts 豁免灼伤减半 */
   attackerAbility?: string;
+  /** 攻击方当前主要状态（brn/par/slp/tox/psn/frz）：灼伤使物理伤害 ×0.5、Facade 翻倍 */
+  attackerStatus?: string;
   defenderSpecies: string;
   /** 守方已知实际能力值（如我方 request 的 stats）：传入则优先于物种基础种族值 */
   defenderStats?: Record<string, number>;
@@ -169,6 +171,7 @@ export function boostMultiplier(stage: number): number {
  * 粗估伤害（绝对数值不保证精确，只用于相对比较）。
  * 简单公式：BP × 攻方系数 × 克制 × STAB × spread × 天气，再按守方防御能力值（有实际值优先，否则种族值）换算成 HP 百分比。
  * 已知攻守能力阶级（boosts）时按 PS 曲线折算：估算始终反映当前场上的实际输出与承伤。
+ * 攻击方异常状态：灼伤使物理伤害 ×0.5（Guts/Facade 豁免），Facade 在非睡眠状态下威力 ×2。
  */
 export function estimateDamagePercent(input: DamageEstimateInput): number | null {
   const move = input.dex.moves[toId(input.moveId)];
@@ -178,7 +181,12 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
   if (!basePower || basePower <= 0) return null;
   // 气象球随天气改属性翻倍；-ate 皮肤把一般系招式转属性并加 1.2x 威力
   const {type: moveType, powerMultiplier} = estimatedMove(input.moveId, move.type, input.weather, input.attackerAbility);
-  const power = basePower * powerMultiplier;
+  const rawStatus = toId(input.attackerStatus ?? '');
+  const statusId = rawStatus && rawStatus !== 'fnt' ? rawStatus : '';
+  const isFacade = toId(input.moveId) === 'facade';
+  // PS moves.ts onBasePower（Facade）：带异常状态（睡眠除外）时威力 ×2
+  const statusPower = isFacade && statusId && statusId !== 'slp' ? 2 : 1;
+  const power = basePower * powerMultiplier * statusPower;
   const eff = knownEffectiveness(input.dex, moveType, def.types);
   if (eff === null) return null;
   if (eff === 0) return 0;
@@ -186,15 +194,20 @@ export function estimateDamagePercent(input: DamageEstimateInput): number | null
     ? (toId(input.attackerAbility ?? '') === 'adaptability' ? 2 : 1.5)
     : 1;
   const physical = move.category === 'Physical';
+  // PS abilities.ts（Guts）：带任意主要状态时攻击值 ×1.5（配套灼伤豁免，两者同源于 Guts）
+  const gutsBoost = physical && statusId && toId(input.attackerAbility ?? '') === 'guts' ? 1.5 : 1;
   const offStat = ((physical ? input.attackerStats?.atk : input.attackerStats?.spa) ?? 150)
-    * boostMultiplier(input.attackerBoosts?.[physical ? 'atk' : 'spa'] ?? 0);
+    * boostMultiplier(input.attackerBoosts?.[physical ? 'atk' : 'spa'] ?? 0) * gutsBoost;
   const defStat = ((physical
     ? input.defenderStats?.def ?? def.baseStats.def
     : input.defenderStats?.spd ?? def.baseStats.spd) ?? 100)
     * boostMultiplier(input.defenderBoosts?.[physical ? 'def' : 'spd'] ?? 0);
   const spread = input.isSpread ? 0.75 : 1;
   const weather = weatherModifier(input.weather, moveType);
-  const raw = power * (offStat / 150) * eff * stab * spread * weather;
+  // PS battle-actions（gen6+）：灼伤使物理伤害 ×0.5；Guts 特性与 Facade 豁免
+  const burnPenalty = statusId === 'brn' && physical && !isFacade
+    && toId(input.attackerAbility ?? '') !== 'guts' ? 0.5 : 1;
+  const raw = power * (offStat / 150) * eff * stab * spread * weather * burnPenalty;
   const pct = (raw * 100) / (defStat * 2 + 80);
   return Math.max(1, Math.min(150, Math.round(pct)));
 }

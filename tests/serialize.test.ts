@@ -18,7 +18,7 @@ describe('增强 payload 与渲染', () => {
     p.item = 'salamencite';
     expect(isMegaCapable({...dex, species: {}}, p)).toBe(false);
   });
-  it('我方场上、替补、preview 均保留完整配置与当前招式请求', () => {
+  it('我方场上、替补均保留完整配置与当前招式请求，全队 6 只不重复序列化', () => {
     const request = mkRequest();
     request.side.pokemon[0].baseAbility = 'Emergency Exit';
     const state = mkTracker().state;
@@ -28,8 +28,11 @@ describe('增强 payload 与渲染', () => {
     expect(ours.active[0]).toMatchObject({slot: 1, ident: request.side.pokemon[0].ident, moves: request.side.pokemon[0].moves, stats: request.side.pokemon[0].stats, base_ability: 'Emergency Exit'});
     expect(ours.active[0].move_request).toEqual(request.active![0].moves);
     expect(ours.bench[0]).toMatchObject({moves: request.side.pokemon[2].moves, ability: 'sandstream', item: 'choicescarf', stats: request.side.pokemon[2].stats});
-    expect(ours.preview).toHaveLength(4);
-    expect(ours.preview[2]).toMatchObject({slot: 3, speed: 123});
+    // 每个 team slot 只在 active/bench 出现一次（各条自带 slot 字段），不再有 preview 副本
+    expect(ours).not.toHaveProperty('preview');
+    const all = [...ours.active, ...ours.bench];
+    expect(all.map((p: any) => p.slot)).toEqual([1, 2, 3, 4]);
+    expect(all[2]).toMatchObject({slot: 3, speed: 123});
     expect(ours.team_notes).toHaveLength(4);
     expect(payload.analysis_notes).toMatch(/not a calibrated actual HP%/);
   });
@@ -47,7 +50,11 @@ describe('增强 payload 与渲染', () => {
     expect(opponent.active[0]).toMatchObject({ident: 'p2: Victreebel', item_revealed: 'Choice Scarf', ability_revealed: 'Chlorophyll', volatiles: ['Substitute'], single_turn: ['Protect'], base_speed: 70, speed: null});
     expect(opponent.active[1].ability_revealed).toBeNull();
     expect(opponent.bench.map((p: any) => p.species)).toContain('Charizard');
-    expect(opponent.preview).toHaveLength(6);
+    // 对手三种分组互斥且合起来覆盖全部已知对手，没有 preview 副本
+    expect(opponent).not.toHaveProperty('preview');
+    const all = [...opponent.active, ...opponent.bench, ...opponent.unseen_from_preview];
+    expect(all).toHaveLength(6);
+    expect(new Set(all.map((p: any) => p.species)).size).toBe(6);
     expect(payload.sides.ours).not.toHaveProperty('team_notes');
     expect(JSON.stringify(payload)).not.toContain('outspeeds');
   });
@@ -128,15 +135,17 @@ describe('buildStatePayload', () => {
     expect(payload.battle_context.summary.opponent.brought_count.confirmed).toBeNull();
     expect(payload.sides.opponent.brought_count).toBeNull();
   });
-  it('兼容 recent_log 仅复用清洗后的事件，聊天及原始 request 不旁路进入 payload', () => {
+  it('历史只经 battle_context.recent_turns 送达，聊天及原始 request 不旁路进入 payload', () => {
     const tracker = mkTracker();
     tracker.handleLine('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
     tracker.handleLine('|c|opponent|INJECT');
     tracker.state.log.push('|request|{"INJECT":true}', '|html|INJECT');
     const payload = buildStatePayload({dex, request: mkRequest(), state: tracker.state}) as any;
-    expect(payload.recent_log).toEqual(payload.battle_context?.recent_turns.flatMap((row: any) => row.events).slice(-10));
+    // recent_log 与 battle_context.recent_turns 完全同源，已删除以免同一段历史送两遍
+    expect(payload).not.toHaveProperty('recent_log');
     expect(JSON.stringify(payload)).not.toContain('INJECT');
-    expect(payload.recent_log).toContain('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
+    expect(payload.battle_context.recent_turns.flatMap((row: any) => row.events))
+      .toContain('|move|p2b: Charizard|Heat Wave|p1a: Golisopod');
   });
   it('满血首发换下后，即使旧日志被裁剪，主快照与摘要的已见名单也一致', () => {
     const tracker = mkTracker();
@@ -175,7 +184,23 @@ describe('buildStatePayload', () => {
     expect(payload.sides.opponent.active.map((a: any) => a.species)).toEqual(['Victreebel', 'Charizard']);
     expect(payload.sides.opponent.active[1].hp_percent).toBe(92);
     expect(payload.sides.opponent.brought_count).toBeNull();
-    expect(Array.isArray(payload.recent_log)).toBe(true);
+    expect(payload).not.toHaveProperty('recent_log');
+  });
+  it('同一只宝可梦在 payload 里只出现一次：我方按 team slot、对手按 ident 互斥分组', () => {
+    const payload = buildStatePayload({
+      dex, request: mkRequest(), state: mkTracker().state,
+      analysis: buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 2}),
+    }) as any;
+    const ours = [...payload.sides.ours.active, ...payload.sides.ours.bench];
+    expect(ours.map((p: any) => p.slot).sort((a: number, b: number) => a - b)).toEqual([1, 2, 3, 4]);
+    const opponent = [...payload.sides.opponent.active, ...payload.sides.opponent.bench, ...payload.sides.opponent.unseen_from_preview];
+    const idents = opponent.map((p: any) => p.ident);
+    expect(idents).toHaveLength(6);
+    expect(new Set(idents).size).toBe(6);
+    // 未上场过的对手同样带速度档位与先验 notes —— 这些字段原本靠重复的 opponent.preview 承载
+    const unseen = payload.sides.opponent.unseen_from_preview.find((p: any) => p.species === 'Sneasler');
+    expect(unseen.seen_in_battle).toBe(false);
+    expect(unseen.base_speed).toBe(120);
   });
 });
 
@@ -260,6 +285,42 @@ describe('describeMoveOption', () => {
       target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
     });
     expect(text).toContain('damage unknown');
+  });
+
+  it('灼伤的攻击方：物理招标注减半且估算为减半值，特殊招不加灼伤注解', () => {
+    const base = {dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100}};
+    const burned = describeMoveOption({...base, attackerStatus: 'brn'});
+    expect(burned).toContain('this Pokemon is burned: its physical damage is halved');
+    expect(burned).toMatch(/≈34% damage/);
+    expect(describeMoveOption(base)).not.toContain('burned');
+    const special = describeMoveOption({...base, moveId: 'shadowball', moveName: 'Shadow Ball',
+      attackerTypes: ['Ghost', 'Fire'], attackerStats: {spa: 190}, attackerStatus: 'brn'});
+    expect(special).not.toContain('burned');
+  });
+
+  it('Guts 被灼伤：标注豁免减半与 1.5x 攻击加成，估算按加成后的值', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+      attackerStatus: 'brn', attackerAbility: 'guts',
+    });
+    expect(text).toContain('Guts cancels the burn penalty');
+    expect(text).toContain('1.5x');
+    expect(text).toMatch(/≈103% damage/);
+  });
+
+  it('被灼伤的 Facade：标注翻倍且免减半，估算按双倍威力', () => {
+    const text = describeMoveOption({
+      dex, moveId: 'facade', moveName: 'Facade', pp: 20, maxpp: 20,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      target: {label: 'Foe A', species: 'Victreebel', hpPercent: 100},
+      attackerStatus: 'brn',
+    });
+    expect(text).toContain('Facade is at double power and ignores the burn penalty');
+    expect(text).toMatch(/≈80% damage/);
   });
 });
 
@@ -837,7 +898,8 @@ describe('buildPreviewQuestions 预期对手首发与交手战绩', () => {
     const set = buildPreviewQuestions({
       dex, request, opponentPreviewSpecies: opponentSpecies, analysis, priors: leadPriors(), memory: leadMemory(),
     });
-    const instructions = set.questions.lead_1.instructions;
+    // 批次共享的选队指导随 state.briefing 只送一次，不再逐题重复
+    const instructions = set.briefing;
     expect(instructions).toContain('Most probable foe leads: Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
     expect(instructions).toContain('Your recorded results: vs Sneasler 4W-5L; most common core Metagross+Sneasler 8 battles (5W-3L)');
     expect(instructions).toMatch(/do not reuse the same leads every game/);
@@ -854,12 +916,12 @@ describe('buildPreviewQuestions 预期对手首发与交手战绩', () => {
     const memory = emptyMemory();
     memory.cores['charizard+victreebel'] = {seen: 4, wins: 2, losses: 2, notes: []};
     const coreOnly = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Victreebel', 'Charizard'], analysis, memory});
-    const coreText = coreOnly.questions.lead_1.instructions;
+    const coreText = coreOnly.briefing;
     expect(coreText).toContain('most common core Charizard+Victreebel 4 battles (2W-2L)');
     expect(coreText).not.toContain('these leads');
     expect(coreText).toContain('(speed, your records)');
     const priorOnly = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Sneasler'], analysis, priors: leadPriors()});
-    const priorText = priorOnly.questions.lead_1.instructions;
+    const priorText = priorOnly.briefing;
     expect(priorText).toContain('(speed, type matchups against these leads)');
     expect(priorText).not.toContain('your records');
   });
@@ -870,15 +932,15 @@ describe('buildPreviewQuestions 预期对手首发与交手战绩', () => {
     const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
     const base = {dex, request, opponentPreviewSpecies: ['Sneasler'], analysis};
     const priorOnly = buildPreviewQuestions({...base, priors: leadPriors()});
-    expect(priorOnly.questions.lead_1.instructions).toContain('Sneasler (prior lead rate 14.3%)');
-    expect(priorOnly.questions.lead_1.instructions).not.toContain('battles you played');
-    expect(priorOnly.questions.lead_1.instructions).not.toContain('recorded results');
+    expect(priorOnly.briefing).toContain('Sneasler (prior lead rate 14.3%)');
+    expect(priorOnly.briefing).not.toContain('battles you played');
+    expect(priorOnly.briefing).not.toContain('recorded results');
     const memoryOnly = buildPreviewQuestions({...base, memory: leadMemory()});
-    expect(memoryOnly.questions.lead_1.instructions).toContain('Sneasler (led in 3 of 9 battles you played)');
-    expect(memoryOnly.questions.lead_1.instructions).toContain('vs Sneasler 4W-5L');
+    expect(memoryOnly.briefing).toContain('Sneasler (led in 3 of 9 battles you played)');
+    expect(memoryOnly.briefing).toContain('vs Sneasler 4W-5L');
     const neither = buildPreviewQuestions(base);
-    expect(neither.questions.lead_1.instructions).not.toContain('Most probable foe leads');
-    expect(neither.questions.lead_1.instructions).not.toContain('recorded results');
+    expect(neither.briefing).not.toContain('Most probable foe leads');
+    expect(neither.briefing).not.toContain('recorded results');
     expect((neither.questions.lead_1.criteria as Record<string, string>).slot_1).toContain('as a lead: speed 60');
   });
 
@@ -889,7 +951,7 @@ describe('buildPreviewQuestions 预期对手首发与交手战绩', () => {
     const set = buildPreviewQuestions({
       dex, request, opponentPreviewSpecies: ['Sneasler'], analysis, priors: leadPriors(), memory: leadMemory(),
     });
-    expect(set.questions.lead_1.instructions).not.toContain('Most probable foe leads');
+    expect(set.briefing).not.toContain('Most probable foe leads');
     expect((set.questions.lead_1.criteria as Record<string, string>).slot_1).not.toContain('as a lead:');
   });
 });
@@ -912,10 +974,10 @@ describe('buildPreviewQuestions 预期 Mega 形态对位', () => {
     const criteria = set.questions.lead_1.criteria as Record<string, string>;
     expect(criteria.slot_2).toContain('likely-form coverage');
     expect(criteria.slot_2).toContain('Heat Wave (Fire) hits likely Golisopod-Mega [Bug/Steel] 4x');
-    expect(set.questions.lead_1.instructions).toMatch(/vary your lead pair/);
+    expect(set.briefing).toMatch(/vary your lead pair/);
     const none = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Golisopod'], analysis});
     expect((none.questions.lead_1.criteria as Record<string, string>).slot_2).not.toContain('likely-form coverage');
-    expect(none.questions.lead_1.instructions).not.toContain('likely-form coverage');
+    expect(none.briefing).not.toContain('likely-form coverage');
   });
 });
 
@@ -934,7 +996,7 @@ describe('buildPreviewQuestions 对手群攻警示', () => {
       dex, request, opponentPreviewSpecies: ['Farigiraf'], analysis,
       opponentSpreadThreats: ['Farigiraf Expanding Force 62.3% (spread only while Psychic Terrain is active)'],
     });
-    const text = set.questions.lead_1.instructions;
+    const text = set.briefing;
     expect(text).toContain('Farigiraf Expanding Force 62.3%');
     expect(text).toMatch(/spread moves hit both foes at once and ignore redirection/i);
     expect(text).toMatch(/Follow Me cannot redirect them/i);
@@ -958,20 +1020,20 @@ describe('buildPreviewQuestions 对手群攻警示', () => {
       dex: data, request, opponentPreviewSpecies: ['Farigiraf'], analysis,
       opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
     });
-    expect(set.questions.lead_1.instructions).toContain('Chandelure Expanding Force (spread only while Psychic Terrain is active and the user is grounded)');
+    expect(set.briefing).toContain('Chandelure Expanding Force (spread only while Psychic Terrain is active and the user is grounded)');
     const none = buildPreviewQuestions({dex: data, request, opponentPreviewSpecies: ['Farigiraf'], analysis});
-    expect(none.questions.lead_1.instructions).not.toContain('Opponent spread threats');
+    expect(none.briefing).not.toContain('Opponent spread threats');
     const legacy = buildPreviewQuestions({
       dex: data, request, opponentPreviewSpecies: ['Farigiraf'],
       opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
     });
-    expect(legacy.questions.lead_1.instructions).not.toContain('Opponent spread threats');
+    expect(legacy.briefing).not.toContain('Opponent spread threats');
     const l1Set = buildPreviewQuestions({
-      dex: data, request, opponentPreviewSpecies: ['Farigiraf'],
-      analysis: buildAnalysisContext({dex: data, request, state, level: 1}),
+      dex, request, opponentPreviewSpecies: ['Farigiraf'],
+      analysis: buildAnalysisContext({dex, request, state, level: 1}),
       opponentSpreadThreats: ['Farigiraf Expanding Force 62.3%'],
     });
-    expect(l1Set.questions.lead_1.instructions).not.toContain('Opponent spread threats');
+    expect(l1Set.briefing).not.toContain('Opponent spread threats');
   });
 });
 
@@ -1280,10 +1342,10 @@ describe('preview 候选特性全量展示', () => {
     const state = mkTracker().state;
     const analysis = buildAnalysisContext({dex, request, state, level: 1});
     const payload = buildStatePayload({dex, request, state, analysis}) as any;
-    expect(payload.sides.ours.preview[2].possible_abilities).toEqual(['Sand Stream', 'Unnerve']);
+    expect(payload.sides.ours.bench.find((p: any) => p.species === 'Tyranitar').possible_abilities).toEqual(['Sand Stream', 'Unnerve']);
     expect(payload.sides.ours.active[0].possible_abilities).toEqual(['Emergency Exit']);
     const opponent = payload.sides.opponent;
-    expect(opponent.preview.find((p: any) => p.species === 'Victreebel').possible_abilities).toEqual(['Chlorophyll']);
+    expect(opponent.active.find((p: any) => p.species === 'Victreebel').possible_abilities).toEqual(['Chlorophyll']);
     expect(opponent.unseen_from_preview.find((p: any) => p.species === 'Sneasler').possible_abilities).toEqual(['Unburden']);
   });
 });

@@ -4,7 +4,7 @@ import {findOurPokemon} from '../state/analysis.js';
 import {effectiveness, estimateDamagePercent} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
-  activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
+  activeEntries, benchEntries, conditionPercent, conditionStatus, isFainted, speciesOf, teamSlotOf,
   type BattleRequest, type RequestPokemon,
 } from '../state/request.js';
 import {opponentActives, PROTECT_LIKE_MOVES} from '../state/serialize.js';
@@ -103,7 +103,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
         for (const foe of foes) {
           const pct = estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
-            attackerAbility: me.ability ?? me.baseAbility,
+            attackerAbility: me.ability ?? me.baseAbility, attackerStatus: conditionStatus(me.condition),
             attackerBoosts: tracked?.boosts, defenderBoosts: foe.boosts,
             defenderSpecies: foe.species, isSpread: spreadHits, weather,
           }) ?? 0;
@@ -113,7 +113,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
         for (let fi = 0; fi < foes.length; fi++) {
           const pct = estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
-            attackerAbility: me.ability ?? me.baseAbility,
+            attackerAbility: me.ability ?? me.baseAbility, attackerStatus: conditionStatus(me.condition),
             attackerBoosts: tracked?.boosts, defenderBoosts: foes[fi].boosts,
             defenderSpecies: foes[fi].species, weather,
           }) ?? 0;
@@ -129,7 +129,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
         score = foe
           ? estimateDamagePercent({
             dex, moveId: mv.id, attackerTypes: types, attackerStats: me.stats,
-            attackerAbility: me.ability ?? me.baseAbility,
+            attackerAbility: me.ability ?? me.baseAbility, attackerStatus: conditionStatus(me.condition),
             attackerBoosts: tracked?.boosts, defenderBoosts: foe.boosts,
             defenderSpecies: foe.species, weather,
           }) ?? 0

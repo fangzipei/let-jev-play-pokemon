@@ -16,9 +16,15 @@ export const PREVIEW_QUESTION_NAMES = ['lead_1', 'lead_2', 'bring_3', 'bring_4']
 export interface PreviewQuestionSet {
   questions: Record<string, Question>;
   descriptionByKey: Record<string, string>;
+  /** 四个问题共享的选队上下文（批次规则 + 对手相关指导）：随 state 送一次，不逐题重复 */
+  briefing: string;
 }
 
-const INTRO = BATTLE_GOAL +
+/**
+ * 批次级共享上下文：先验/经验驱动的选队指导句也拼到这里（只出现一次）。
+ * 逐题指令只保留整局目标与本题任务，避免同一段文本在四个问题里各复制一遍。
+ */
+const FRAMING =
   'You are choosing which 4 of your 6 Pokemon to bring to a doubles (VGC-style) battle, and in which order. ' +
   'The first two brought Pokemon are your leads (they start on the field). ' +
   'Species/item clauses are active; Mega Evolution is limited to one Pokemon per battle. ' +
@@ -131,20 +137,20 @@ export function buildPreviewQuestions(input: {
   const coverageAdvice = likelyMegaFoes.length
     ? " Check each slot's likely-form coverage: when it lists a probable Mega form, favor that attacker and vary your lead pair instead of repeating a default combination."
     : '';
-  const intro = INTRO + (input.analysis && input.analysis.level >= 2
+  const briefing = FRAMING + (input.analysis && input.analysis.level >= 2
     ? ' Vary your leads based on the opponent: consider both directions of type matchups, uncertain speed information and current team roles; do not default to the same leads every game. A support or terrain setter earns a lead slot only when its entry effect or matchup answers the opponent\'s likely opening, not out of habit.' + coverageAdvice + megaAdvice + weatherAdvice + leadIntelText + spreadAdvice : '');
   const instructions: Record<string, string> = {
-    lead_1: `${intro} Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
-    lead_2: `${intro} Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,
-    bring_3: `${intro} Pick the THIRD Pokemon (first reserve): the main backup answer to threats that pressure your intended leads.`,
-    bring_4: `${intro} Pick the FOURTH Pokemon (second reserve): complementary coverage and an endgame plan for that intended four-Pokemon combination.`,
+    lead_1: `${BATTLE_GOAL} Read state.briefing for this batch's shared selection rules, opponent reads and matchup guidance. Pick your FIRST lead: the primary anchor of your intended lead pair against the opponent preview.`,
+    lead_2: `${BATTLE_GOAL} Read state.briefing for this batch's shared selection rules, opponent reads and matchup guidance. Pick your SECOND lead: a complementary partner in the intended lead pair, rather than a second copy of its primary anchor.`,
+    bring_3: `${BATTLE_GOAL} Read state.briefing for this batch's shared selection rules, opponent reads and matchup guidance. Pick the THIRD Pokemon (first reserve): the main backup answer to threats that pressure your intended leads.`,
+    bring_4: `${BATTLE_GOAL} Read state.briefing for this batch's shared selection rules, opponent reads and matchup guidance. Pick the FOURTH Pokemon (second reserve): complementary coverage and an endgame plan for that intended four-Pokemon combination.`,
   };
 
   const questions: Record<string, Question> = {};
   for (const name of PREVIEW_QUESTION_NAMES) {
     questions[name] = {type: 'choice', instructions: instructions[name], criteria: {...descriptionByKey}};
   }
-  return {questions, descriptionByKey};
+  return {questions, descriptionByKey, briefing};
 }
 
 /** 按 lead_1 → lead_2 → bring_3 → bring_4 取答案；重复/非法时用 probabilities 或首个未用槽位补齐 */

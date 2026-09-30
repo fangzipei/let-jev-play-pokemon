@@ -178,6 +178,7 @@ export function mkDex(): DexData {
     flipturn: mkMove('Flip Turn', 'Water', 60, 'Physical'),
     perishsong: mkMove('Perish Song', 'Normal', 0, 'Status', 'all'),
     yawn: mkMove('Yawn', 'Normal', 0, 'Status', 'normal'),
+    facade: mkMove('Facade', 'Normal', 70, 'Physical'),
     auroraveil: mkMove('Aurora Veil', 'Ice', 0, 'Status', 'allySide'),
     weatherball: mkMove('Weather Ball', 'Normal', 50, 'Special'),
     flareblitz: mkMove('Flare Blitz', 'Fire', 120, 'Physical'),

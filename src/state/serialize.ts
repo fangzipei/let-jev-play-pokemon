@@ -100,6 +100,8 @@ export interface SerializeInput {
   dex: DexData;
   analysis?: AnalysisContext;
   opponentNotes?: Record<string, OpponentNoteSet> | null;
+  /** 本批问题共享的上下文（如选队简报）：随 state 只送一次，不在每个问题的指令里重复 */
+  briefing?: string;
 }
 
 /** pokedex 中该物种的全部候选特性（含未选中的隐藏/特殊槽位），按 0/1/H/S 键序去重；数据缺失时返回空数组 */
@@ -108,7 +110,7 @@ function possibleAbilitiesOf(dex: DexData, species: string): string[] {
   return [...new Set(['0', '1', 'H', 'S'].flatMap(key => abilities[key] ? [abilities[key]!] : []))];
 }
 
-export function buildStatePayload({state, request, dex, analysis, opponentNotes}: SerializeInput): Record<string, unknown> {
+export function buildStatePayload({state, request, dex, analysis, opponentNotes, briefing}: SerializeInput): Record<string, unknown> {
   const battleContext = buildBattleContext({state, request});
   const ourSideId = request.side.id;
   const ourSideState = state.sides[ourSideId];
@@ -131,11 +133,11 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
         potential_stab: threat?.potentialStab ?? [], outgoing_matchups: threat?.outgoing ?? []} : {}),
     };
   };
+  // 我方不做 preview 复制：active + bench 已按 team slot 覆盖全部 6 只（各条自带 slot 字段）
   const ours = {
     mega_used: ourSideState?.megaUsed ?? false,
     active: active.map(ourPokemon),
     bench: request.side.pokemon.filter(p => !p.active).map(ourPokemon),
-    ...(analysis ? {preview: request.side.pokemon.map(ourPokemon)} : {}),
     ...(analysis && analysis.level >= 2 ? {team_notes: analysis.teamNotes} : {}),
   };
   const opponentPokemon = (p: PokemonState) => {
@@ -161,14 +163,16 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     };
   };
   const opponents = oppSideState?.pokemon ?? [];
+  // 三组互斥且字段同构：active（在场）/ bench（已见未上场）/ unseen_from_preview（未上场过）。
+  // 不再额外复制一份 opponent.preview —— 未上场过的对手同样带先验与速度档位，
+  // 由 unseen_from_preview 直接承载，避免同一只对手在 payload 里出现两次。
   const opponent = {
     side_conditions: oppSideState?.sideConditions ?? [],
     brought_count: battleContext.summary.opponent.brought_count.confirmed,
     seen_count: opponents.filter(p => seenInBattle(p)).length,
     active: opponents.filter(p => p.activePos >= 0).sort((a, b) => a.activePos - b.activePos).map(opponentPokemon),
     bench: opponents.filter(p => p.activePos < 0 && seenInBattle(p)).map(opponentPokemon),
-    unseen_from_preview: opponents.filter(p => !seenInBattle(p)).map(p => ({species: p.species, types: speciesTypes(dex, p.species), possible_abilities: possibleAbilitiesOf(dex, p.species)})),
-    ...(analysis ? {preview: opponents.map(opponentPokemon)} : {}),
+    unseen_from_preview: opponents.filter(p => !seenInBattle(p)).map(opponentPokemon),
   };
 
   return {
@@ -181,8 +185,7 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes}
     speed_control: speedControlOf(state, ourSideId),
     sides: {ours, opponent},
     battle_context: battleContext,
-    // 兼容旧消费者，但不再将聊天、原始 request 等噪声旁路送入模型。
-    recent_log: battleContext.recent_turns.flatMap(row => row.events).slice(-10),
+    ...(briefing ? {briefing} : {}),
     ...(analysis ? {analysis_notes: `${DAMAGE_CAVEAT}; potential STAB is type-only, not revealed moves; opponent actual speed and move order unknown`} : {}),
   };
 }
@@ -197,8 +200,10 @@ export interface MoveOptionInput {
   attackerStats?: Record<string, number>;
   /** 攻击方当前能力阶级（atk/spa）：已知时伤害估算按当前值折算 */
   attackerBoosts?: Record<string, number>;
-  /** 攻击方当前特性（Adaptability 等本系加成修正） */
+  /** 攻击方当前特性（Adaptability 等本系加成修正；Guts 带状态时攻击 ×1.5 且豁免灼伤减半） */
   attackerAbility?: string;
+  /** 攻击方当前主要状态 id（如 brn）：灼伤物理减半、Facade 翻倍、Guts 加成；与伤害估算同源 */
+  attackerStatus?: string;
   target?: {label: string; species: string; hpPercent: number; ident?: string; status?: string | null; boosts?: Record<string, number>;
     /** 已 Mega 进化（Mega 石不可交换，Trick 会失败） */
     mega?: boolean;
@@ -547,6 +552,7 @@ export function describeMoveOption(input: MoveOptionInput): string {
         const pct = estimateDamagePercent({
           dex: input.dex, moveId: input.moveId, attackerTypes: input.attackerTypes,
           attackerStats: input.attackerStats, attackerAbility: input.attackerAbility,
+          attackerStatus: input.attackerStatus,
           attackerBoosts: input.attackerBoosts, defenderBoosts: target.boosts,
           defenderSpecies: target.species,
           isSpread: spreadPenalty, weather: input.weather, powerOverride: lastRespectsPower(input) ?? hpScaledPower(input) ?? lowKickBP,
@@ -573,6 +579,21 @@ export function describeMoveOption(input: MoveOptionInput): string {
     extras.push('(status move, no direct damage)');
   } else {
     extras.push('(damage unknown: missing move data or variable power)');
+  }
+  // 攻击方异常状态与估算同源：灼伤物理减半（Guts/Facade 豁免）、Guts 状态时攻击 ×1.5、Facade 非睡眠翻倍
+  const attackerStatus = toId(input.attackerStatus ?? '');
+  if (move && attackerStatus && attackerStatus !== 'fnt') {
+    const gutsActive = toId(input.attackerAbility ?? '') === 'guts' && move.category === 'Physical';
+    const facadeActive = toId(input.moveId) === 'facade' && attackerStatus !== 'slp';
+    if (attackerStatus === 'brn' && move.category === 'Physical') {
+      if (facadeActive) extras.push('(this Pokemon is burned: Facade is at double power and ignores the burn penalty — the estimate includes both)');
+      else if (gutsActive) extras.push('(this Pokemon is burned, but Guts cancels the burn penalty and boosts its Attack by 1.5x — the estimate includes both)');
+      else extras.push('(this Pokemon is burned: its physical damage is halved and the estimate already reflects that)');
+    } else if (facadeActive) {
+      extras.push(`(Facade is at double power while this Pokemon has a status condition (${attackerStatus}); the estimate reflects that)`);
+    } else if (gutsActive) {
+      extras.push(`(Guts boosts this Pokemon's Attack by 1.5x while it has a status condition (${attackerStatus}); the estimate reflects that)`);
+    }
   }
   const main = input.attackerMainAttack;
   // 主攻属性被降时引导换人重置；估算已按当前阶级折算，不再提示偏差

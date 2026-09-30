@@ -110,8 +110,10 @@ describe('三级上下文与辅助分析接线', () => {
       expect(input.kind).toBe(kind);
       expect(Object.keys(input.questions).length).toBeGreaterThan(0);
       const state = input.state as any;
-      expect(state.sides.ours.preview[0].moves.length).toBeGreaterThan(0);
-      expect(state.sides.ours.preview[0].stats).toBeDefined();
+      const ourTeam = [...state.sides.ours.active, ...state.sides.ours.bench];
+      expect(ourTeam).toHaveLength(4);
+      expect(ourTeam[0].moves.length).toBeGreaterThan(0);
+      expect(ourTeam[0].stats).toBeDefined();
       expect(state.sides.ours.team_notes.length).toBeGreaterThan(0);
       expect(state.advisor_analysis).toBeUndefined();
       expect(state.battle_context).toMatchObject({phase: kind, turn: 1});
@@ -144,7 +146,7 @@ describe('三级上下文与辅助分析接线', () => {
     ctx.cfg.jevContextLevel = level;
     ctx.advisor = {analyze};
     await decideChoice(ctx);
-    expect(captured.sides.ours.preview[0].speed).toBeDefined();
+    expect([...captured.sides.ours.active, ...captured.sides.ours.bench][0].speed).toBeDefined();
     expect(captured.sides.ours.team_notes !== undefined).toBe(level === 2);
     expect(captured.advisor_analysis).toBeUndefined();
     expect(analyze).not.toHaveBeenCalled();
@@ -497,7 +499,7 @@ describe('对手注解与经验注入接线', () => {
     request.teamPreview = true;
     request.active = undefined;
     let captured: any;
-    const ctx = mkCtx({request, jev: mkJev(input => {captured = input.questions; return {};})});
+    const ctx = mkCtx({request, jev: mkJev(input => {captured = input; return {};})});
     ctx.cfg.jevContextLevel = 2;
     ctx.priors = pikaToPriors(parsePikaList([{
       name: 'Sneasler', rank: '2', percent: '30', winPercent: '50', stats: {spe: 120},
@@ -506,8 +508,13 @@ describe('对手注解与经验注入接线', () => {
     ctx.memory = emptyMemory();
     ctx.memory.species.sneasler = {name: 'Sneasler', seen: 9, wins: 4, losses: 5, leads: 3, items: {}, abilities: {}, moves: {}, notes: []};
     await decideChoice(ctx);
-    expect(captured.lead_1.instructions).toContain('Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
-    expect(captured.lead_1.instructions).toContain('vs Sneasler 4W-5L');
+    // 先验与经验库进的是批次共享简报（随 state 送达一次），不在四个问题里各复制一遍
+    expect(captured.state.briefing).toContain('Sneasler (prior lead rate 14.3%; led in 3 of 9 battles you played)');
+    expect(captured.state.briefing).toContain('vs Sneasler 4W-5L');
+    for (const question of Object.values(captured.questions) as any[]) {
+      expect(question.instructions).toContain('win the entire battle');
+      expect(question.instructions).not.toContain('prior lead rate');
+    }
   });
 });
 

@@ -4,7 +4,7 @@ import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
 import {entryWeatherOf, estimatedMove, megaSkinAbility, superEffectivePhrase} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
-  activeEntries, benchEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
+  activeEntries, benchEntries, conditionPercent, conditionStatus, isFainted, speciesOf, teamSlotOf,
   type BattleRequest,
 } from '../state/request.js';
 import {describeMoveOption, describeSwitchOption, fakeOutThreats, mainAttackOf, opponentActives, PROTECT_LIKE_MOVES, type OpponentActive} from '../state/serialize.js';
@@ -217,6 +217,7 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         attackerStats: me.stats,
         attackerBoosts: trackedSelf?.boosts,
         attackerAbility: me.ability ?? me.baseAbility,
+        attackerStatus: conditionStatus(me.condition),
         target: foe ? {label: foe.label, species: foe.species, hpPercent: foe.hpPercent, ident: foe.ident, status: foe.status, boosts: foe.boosts, mega: foe.mega, item: foe.item, consumedItem: foe.consumedItem} : undefined,
         targets: hitsBoth && foes.length ? foes.map(f => ({label: f.label, species: f.species, hpPercent: f.hpPercent, ident: f.ident, status: f.status, boosts: f.boosts})) : undefined,
         analysis: input.analysis,
