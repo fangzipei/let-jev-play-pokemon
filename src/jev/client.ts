@@ -74,6 +74,35 @@ function errorBodySnippet(text: string): string | undefined {
   return message || code || undefined;
 }
 
+/** 每次失败尝试的白名单摘要挂在错误对象上的私有键（symbol 不参与序列化/日志） */
+const CALL_ATTEMPTS: unique symbol = Symbol('jevCallAttempts');
+
+/** 读取挂在错误对象上的尝试明细（副本）；未挂载时返回 undefined */
+export function callAttemptsOf(err: unknown): string[] | undefined {
+  if (err === null || (typeof err !== 'object' && typeof err !== 'function')) return undefined;
+  const attempts = (err as {[CALL_ATTEMPTS]?: unknown})[CALL_ATTEMPTS];
+  return Array.isArray(attempts) ? attempts.map(String) : undefined;
+}
+
+/** 把尝试明细挂到最终抛出的错误对象；冻结/不可扩展对象上静默放弃，不影响错误传播 */
+function attachAttempts(err: unknown, attempts: string[]): void {
+  if (!attempts.length || err === null || (typeof err !== 'object' && typeof err !== 'function')) return;
+  try {
+    (err as {[CALL_ATTEMPTS]?: string[]})[CALL_ATTEMPTS] = [...attempts];
+  } catch {
+    // 冻结或不可扩展的错误对象
+  }
+}
+
+/** 尝试明细条目：DecisionsHttpError 保留其白名单摘要；其余只取类名（截 60）与数字状态码，不带 message */
+function describeError(err: unknown): string {
+  if (err instanceof DecisionsHttpError) return err.message;
+  if (err === null || typeof err !== 'object') return `非 Error 值（${typeof err}）`;
+  const named = err as {name?: unknown; statusCode?: unknown};
+  const name = typeof named.name === 'string' && named.name ? named.name : 'Error';
+  return `${name.slice(0, 60)}${typeof named.statusCode === 'number' ? `/${named.statusCode}` : ''}`;
+}
+
 // 显式禁止 SDK 通过 OPENROUTER_DEBUG 输出鉴权头与响应正文。
 const silentSdkLogger = {log() {}, group() {}, groupEnd() {}};
 
@@ -224,7 +253,9 @@ export function createJevClient(opts: JevClientOptions): JevClient {
     async decide(input: DecideInput, control: CallControl = {}): Promise<DecideResult> {
       const started = Date.now();
       const deadlineAt = Math.min(started + timeoutMs, control.deadlineAt ?? Infinity);
-      return withDeadline(async (signal) => {
+      // 每次失败尝试的白名单摘要收集到此处，最终挂到对外抛出的错误上（含 withDeadline race 路径）
+      const attempts: string[] = [];
+      const pending = withDeadline(async (signal) => {
         const body: Record<string, unknown> = {
           model: opts.model, state: input.state, questions: input.questions,
         };
@@ -264,14 +295,26 @@ export function createJevClient(opts: JevClientOptions): JevClient {
             opts.logger?.debug(`jev 决策完成（${Object.keys(answers).length} 个答案，${latencyMs}ms）`);
             return {answers, usage, latencyMs, raw};
           } catch (err) {
+            if (err instanceof DeadlineExceededError || err instanceof CallCancelledError) {
+              checkActive(signal, deadlineAt);
+              throw err;
+            }
+            const described = describeError(err);
+            attempts.push(described);
             checkActive(signal, deadlineAt);
-            if (err instanceof DeadlineExceededError || err instanceof CallCancelledError) throw err;
             lastError = err instanceof DecisionsHttpError ? err : new Error('jev 调用失败（网络、SDK 或响应格式异常）');
-            opts.logger?.warn(`jev 调用失败（第 ${attempt + 1}/${maxRetries + 1} 次）: ${lastError.message}`);
+            // HTTP 错误的 message 已是白名单摘要；其他错误追加类名/状态码后缀便于定位（不含 message）
+            opts.logger?.warn(`jev 调用失败（第 ${attempt + 1}/${maxRetries + 1} 次）: ${lastError.message}${err instanceof DecisionsHttpError ? '' : ` [${described}]`}`);
           }
         }
         throw lastError;
       }, {...control, deadlineAt});
+      try {
+        return await pending;
+      } catch (err) {
+        attachAttempts(err, attempts);
+        throw err;
+      }
     },
   };
 }

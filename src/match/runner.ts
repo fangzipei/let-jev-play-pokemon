@@ -9,6 +9,7 @@ import {createJevClient, type JevClient} from '../jev/client.js';
 import {loadMemory} from '../learn/store.js';
 import {createLogger, type Logger} from '../log/logger.js';
 import type {BattleRoom, BattleSummary} from '../ps/battle-room.js';
+import {createChatResponder} from '../ps/chat.js';
 import {PsConnection, type WsLike} from '../ps/connection.js';
 import {PsSession} from '../ps/session.js';
 import {loadTeamPaste, packTeam, stripMegaSuffix} from '../ps/team.js';
@@ -120,6 +121,18 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
 
   let fatal: string | undefined;
   const conn = new PsConnection({serverUrl: cfg.psServer, logger, wsFactory: opts.wsFactory});
+  // 对手聊天应答：与决策链完全独立，失败只记日志；JEV_MOCK 或 0 条上限时不创建。
+  const chat = !cfg.jevMock && cfg.jevChatMaxReplies > 0 && cfg.jevChatApiKey.trim()
+    ? createChatResponder({
+      apiKey: cfg.jevChatApiKey,
+      model: cfg.jevChatModel,
+      maxRepliesPerBattle: cfg.jevChatMaxReplies,
+      fetchImpl: opts.fetchImpl,
+      logger,
+      send: (battleId, text) => conn.send(battleId, text),
+    })
+    : null;
+  if (chat) logger.info(`对手聊天应答已启用（${cfg.jevChatModel}，每局最多 ${cfg.jevChatMaxReplies} 条）`);
   const session = new PsSession({
     conn,
     cfg,
@@ -129,6 +142,7 @@ export async function runMatch(opts: RunOptions = {}): Promise<RunResult> {
     advisor,
     priors,
     memory,
+    chat,
     packedTeam: team.packed,
     packedTeamFallback: teamFallback.packed,
     fetchImpl: opts.fetchImpl,

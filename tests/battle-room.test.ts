@@ -5,6 +5,7 @@ import type {AdvisorClient, AdvisorResult} from '../src/jev/advisor.js';
 import type {DecideResult, JevClient} from '../src/jev/client.js';
 import {nullLogger} from '../src/log/logger.js';
 import {BattleRoom, type BattleRoomOptions} from '../src/ps/battle-room.js';
+import type {ChatInput} from '../src/ps/chat.js';
 import type {PsConnection} from '../src/ps/connection.js';
 import {mkDex, mkRequest} from './helpers.js';
 
@@ -537,5 +538,39 @@ describe('BattleRoom 非法指令恢复', () => {
     room.handleLine('|error|[Invalid choice] Sorry, too late to make a different move; the next turn has already started');
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(sent.length).toBe(1);
+  });
+});
+
+describe('BattleRoom 对手聊天分发', () => {
+  it('对手发言路由到聊天应答器并携带事实快照', () => {
+    const respond = vi.fn(async (_input: ChatInput) => {});
+    const {room} = mkHarness({chat: {respond}});
+    room.handleLine('|c|☆opponent|glhf');
+    expect(respond).toHaveBeenCalledTimes(1);
+    const input = respond.mock.calls[0][0];
+    expect(input).toMatchObject({
+      battleId: 'battle-test-1', ourName: 'JevBot1234', opponentName: 'opponent', text: 'glhf',
+    });
+    expect(input.facts.turn).toBe(0);
+  });
+
+  it('文本含管道符时完整还原给应答器', () => {
+    const respond = vi.fn(async (_input: ChatInput) => {});
+    const {room} = mkHarness({chat: {respond}});
+    room.handleLine('|c|☆opponent|a|b|c');
+    expect(respond.mock.calls[0][0].text).toBe('a|b|c');
+  });
+
+  it.each(['|c|☆JevBot1234|hi', '|c|☆stranger|hi', '|c|☆opponent|', '|c||hi'])(
+    '非对手有效发言 %j 不触发应答', line => {
+      const respond = vi.fn(async (_input: ChatInput) => {});
+      const {room} = mkHarness({chat: {respond}});
+      room.handleLine(line);
+      expect(respond).not.toHaveBeenCalled();
+    });
+
+  it('未注入应答器时聊天行不报错', () => {
+    const {room} = mkHarness();
+    expect(() => room.handleLine('|c|☆opponent|hello')).not.toThrow();
   });
 });

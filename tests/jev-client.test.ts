@@ -1,5 +1,5 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
-import {createJevClient} from '../src/jev/client.js';
+import {callAttemptsOf, createJevClient} from '../src/jev/client.js';
 import {CallCancelledError, DeadlineExceededError} from '../src/jev/deadline.js';
 import {nullLogger} from '../src/log/logger.js';
 import type {Answer} from '../src/jev/types.js';
@@ -82,6 +82,28 @@ describe('createJevClient / fetch 传输', () => {
     expect(error.message).toContain('jev');
     expect(error.message).not.toContain('boom');
     expect(n).toBe(2);
+  });
+
+  it('重试失败时告警带错误类名，错误对象携带每次尝试明细', async () => {
+    const warn = vi.fn();
+    const impl = (async () => { throw new TypeError('fetch failed: private detail'); }) as unknown as typeof fetch;
+    const client = createJevClient({apiKey: 'k', model: 'm', transport: 'fetch', fetchImpl: impl, retry: 1, logger: {...nullLogger, warn}});
+    const error = await client.decide({state: {}, questions}).catch((e) => e);
+    const logged = warn.mock.calls.map(c => String(c[0])).join('\n');
+    expect(logged).toContain('第 1/2 次');
+    expect(logged).toContain('[TypeError]');
+    expect(logged).not.toContain('fetch failed: private detail');
+    expect(callAttemptsOf(error)).toEqual(['TypeError', 'TypeError']);
+    expect(String(error)).not.toContain('fetch failed: private detail');
+  });
+
+  it('HTTP 错误在尝试明细中保留白名单摘要', async () => {
+    const impl = (async () => new Response(
+      JSON.stringify({error: {message: 'Provider returned error', code: 400}}), {status: 429},
+    )) as unknown as typeof fetch;
+    const client = createJevClient({apiKey: 'k', model: 'm', transport: 'fetch', fetchImpl: impl, retry: 0});
+    const error = await client.decide({state: {}, questions}).catch((e) => e);
+    expect(callAttemptsOf(error)).toEqual(['jev decisions API HTTP 429: Provider returned error（code 400）']);
   });
 
   it('超时中断请求', async () => {
@@ -214,6 +236,22 @@ describe('jev 共享截止控制', () => {
     expect(outcome.settled).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(outcome.error).toBeInstanceOf(DeadlineExceededError);
+  });
+
+  it('截止前的快速失败在超时错误上保留尝试明细', async () => {
+    let count = 0;
+    const impl = vi.fn(async () => {
+      if (++count === 1) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        throw new Error('private failure');
+      }
+      return never();
+    });
+    const client = createJevClient({apiKey: 'k', model: 'm', transport: 'fetch', fetchImpl: impl, timeoutMs: 100, retry: 1});
+    const outcome = observe(client.decide(input));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(outcome.error).toBeInstanceOf(DeadlineExceededError);
+    expect(callAttemptsOf(outcome.error)).toEqual(['Error']);
   });
 
   it('SDK 加载失败后 fetch 回退只剩原预算余量', async () => {

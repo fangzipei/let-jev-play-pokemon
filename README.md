@@ -8,6 +8,7 @@
 - 默认 L2 上下文：完整客观信息 + 条件化战术注解；本地速度估计、属性倍率和粗伤害均标明适用范围与未知项
 - L2 起注入对手上下文：已确认信息与最近动作、统计先验（pokechamdb 每日快照：使用率 top + 英文效果说明）、跨局经验条目；缺失时静默降级
 - jev 超时、答案缺失、动作非法或服务器拒绝时尝试本地兜底；请求更新、战斗结束或断线时取消旧决策。兜底不能保证网络恢复、服务器接受动作或避免计时判负
+- 每场开局在房间 chat 用英文告知对手本场由 AI 自动操作，并附项目开源地址；对手发消息时由独立 chat 模型（默认 `deepseek/deepseek-v4.1-flash`）应答：仅限本局对战相关，不骂人不嘲讽，每局至多回复 2 条，与决策链异步隔离、失败静默
 
 ## 安装
 
@@ -34,6 +35,9 @@ PowerShell：`Copy-Item .env.example .env`。然后在 `.env` 里填 `OPENROUTER
 | `JEV_ADVISOR_TIMEOUT_MS` | `10000` | advisor 本地等待预算（毫秒），同时受决策剩余总预算限制 |
 | `JEV_ADVISOR_MAX_TOKENS` | `2048` | advisor 单次输出上限（多数供应方计入推理 token）；不是 120 词本地限制的同义项 |
 | `JEV_ADVISOR_REASONING` | （空） | 显式推理强度 `low`/`medium`/`high`；留空或空白则不发送推理参数，仅对确认支持的模型设置 |
+| `JEV_CHAT_MODEL` | `deepseek/deepseek-v4.1-flash` | 对手聊天应答模型（独立于决策链，与操作异步） |
+| `JEV_CHAT_API_KEY` | （空） | 留空或仅空白时复用 `OPENROUTER_API_KEY` |
+| `JEV_CHAT_MAX_REPLIES` | `2` | 每局我方最多回复条数（`0` = 禁用对手聊天应答），须为非负安全整数 |
 | `JEV_DECISION_BUDGET_MS` | `35000` | 当前请求的决策总预算（毫秒），覆盖上下文准备、advisor + jev，不会在进入 jev 时重置 |
 | `JEV_MOCK` | `0` | `1` = 跳过 jev 和 advisor，全部走本地启发式；仍可能连接 Showdown 和拉取 dex |
 | `JEV_RETRY` | `1` | jev 请求失败后的最多重试次数，与首次尝试共享预算；advisor 不重试 |
@@ -58,7 +62,7 @@ PowerShell：`Copy-Item .env.example .env`。然后在 `.env` 里填 `OPENROUTER
 | `LOG_DIR` | `logs` | 日志目录 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` |
 
-三个超时/预算变量必须是 `1` 至 `2147483647` 的整数毫秒数；非法值在启动校验时拒绝，不静默回退。`JEV_RETRY` 必须是非负安全整数。`JEV_ADVISOR_MAX_TOKENS` 与 `JEV_PIKA_CUTOFF` 必须是正安全整数；非空 `JEV_REVIEW_MAX_TOKENS` 必须是正安全整数（留空或仅空白表示不限制）。非空 `JEV_ADVISOR_REASONING` 必须是 `low`、`medium` 或 `high` 之一。`JEV_CHAMDB_TTL_HOURS` 必须是正数（小时）。非 mock 正常启动仍要求主 API key；独立 advisor key 不能代替 jev 主 key。
+三个超时/预算变量必须是 `1` 至 `2147483647` 的整数毫秒数；非法值在启动校验时拒绝，不静默回退。`JEV_RETRY` 与 `JEV_CHAT_MAX_REPLIES` 必须是非负安全整数（后者 `0` = 禁用对手聊天应答）。`JEV_ADVISOR_MAX_TOKENS` 与 `JEV_PIKA_CUTOFF` 必须是正安全整数；非空 `JEV_REVIEW_MAX_TOKENS` 必须是正安全整数（留空或仅空白表示不限制）。非空 `JEV_ADVISOR_REASONING` 必须是 `low`、`medium` 或 `high` 之一。`JEV_CHAMDB_TTL_HOURS` 必须是正数（小时）。非 mock 正常启动仍要求主 API key；独立 advisor key 不能代替 jev 主 key。
 
 ## 三级上下文与预算
 
@@ -86,6 +90,15 @@ L2 起每只对手宝可梦在 `state` 中带上 `notes`（仅非空字段出现
 - **跨局经验库**：`npm run review` 扫描 `LOG_DIR` 下的 protocol 日志增量入 `JEV_MEMORY_DIR/memory.json`（规则统计按 battleId 幂等去重），按物种与两两组合累计对局数、胜负与已揭示配置；配置 `JEV_REVIEW_MODEL` 时再由模型提炼模式级经验：默认不发送 `max_tokens`（不限制推理与输出），让模型自由推理后按严格 JSON 输出（每物种/组合至多保留 3 条）。review 不自动执行，`--dry-run` 不写库、不调用模型。
 - **模型补跑与计数**：模型进度独立于规则统计；失败或键匹配异常保持待复盘，下一次普通 `review` 自动补跑，成功批次逐批保存。合法空结果标记为“未发现可重复模式”，不反复付费重试；格式错误不会伪装成 0 条成功。日志区分返回、实际新增、重复、未匹配和超限丢弃数量。
 - **旧库兼容**：旧库没有模型进度，默认不自动重跑历史对局。`--retry-model` 显式重新提炼全部可读取的有效日志（包括已成功的对局，会产生模型调用费用），不重复累计战绩，可先与 `--dry-run` 合用预览。历史昵称统计不猜测迁移；日志确认的正确物种若缺少统计记录，可单独保存经验并标记“配置统计不可用”。
+
+## 对手聊天应答
+
+每场开局，机器人在 battle 房间 chat 用英文告知对手本场由 AI 自动操作，并附项目开源地址。对局中对手发消息时，由独立于决策链的 chat 模型（`JEV_CHAT_MODEL`，默认 `deepseek/deepseek-v4.1-flash`）生成回复：
+
+- 仅谈论本局对战、宝可梦或 VGC；无视或拒绝其他话题。不骂人、不嘲讽、不脏话，始终友好；不假装人类；不泄露本局未揭示的队伍配置
+- 每局我方最多回复 `JEV_CHAT_MAX_REPLIES` 条（默认 2，`0` 禁用）；同一时间最多一次生成，生成中到达的新消息不并发调用
+- 输出经本地清理（折叠空白、剥离成对引号、拒绝 `/` 前缀、截断超长）；模型判断无话可说时输出 `SKIP`（含标点/装饰变体）；另有最小 deny 列表兜底脏话与嘲讽词。以上不回复的情况均不发送也不占次数；不承诺覆盖所有变体，内容策略主要由模型提示词保证
+- 与决策完全异步隔离：独立超时与取消，不共享决策预算/截止时间；模型失败、发送失败或超时只记日志，不影响决策与对局
 
 ## dex 数据
 
@@ -149,7 +162,7 @@ $env:DOTENV_CONFIG_PATH='tests/fixtures/nonexistent.env'; npx tsx scripts/demo-c
 ```
 src/index.ts          CLI（play / validate-team / review）
 src/config.ts         环境变量加载与校验
-src/ps/               连接、登录、会话、战斗房间、指令构建、队伍打包
+src/ps/               连接、登录、会话、战斗房间、指令构建、队伍打包、对手聊天应答
 src/state/            协议解析、tracker、request 解析、本地计算、state 序列化、对手笔记
 src/decide/           问题模板（preview/turn/force-switch）、答案解析、兜底、编排
 src/jev/              Decisions API、OpenRouter advisor、共享截止时间与取消控制
@@ -161,3 +174,7 @@ src/match/            多场编排、等待工具、在线队伍检查
 ## 验证记录
 
 `docs/verification.md`（本地资料，不随仓库提交）：spec §13 不确定项与三级上下文增强各阶段的验证结论与证据（含 L2 上下文注入演示、多轮实战对局记录与 Champions 世代数据事实核对）。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源：https://github.com/fangzipei/let-jev-play-pokemon

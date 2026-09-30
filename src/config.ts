@@ -14,6 +14,12 @@ export interface AppConfig {
   jevAdvisorMaxTokens: number;
   /** 仅对确认支持推理参数的模型显式设置；未设置时不注入 reasoning。 */
   jevAdvisorReasoning?: 'low' | 'medium' | 'high';
+  /** 对手聊天应答模型（独立于决策链，默认 deepseek v4.1 flash）。 */
+  jevChatModel: string;
+  /** 聊天应答专用 API key；未设置时复用主 key。 */
+  jevChatApiKey: string;
+  /** 每局我方最多回复条数（0 = 禁用对手聊天应答）。 */
+  jevChatMaxReplies: number;
   jevDecisionBudgetMs: number;
   psServer: string;
   psUsername: string;
@@ -70,6 +76,9 @@ export function loadConfig(
     jevAdvisorTimeoutMs: Number(env.JEV_ADVISOR_TIMEOUT_MS ?? 10000),
     jevAdvisorMaxTokens: Number(env.JEV_ADVISOR_MAX_TOKENS ?? 2048),
     jevAdvisorReasoning: parseAdvisorReasoning(env.JEV_ADVISOR_REASONING),
+    jevChatModel: env.JEV_CHAT_MODEL?.trim() || 'deepseek/deepseek-v4.1-flash',
+    jevChatApiKey: env.JEV_CHAT_API_KEY?.trim() || mainKey,
+    jevChatMaxReplies: env.JEV_CHAT_MAX_REPLIES?.trim() ? Number(env.JEV_CHAT_MAX_REPLIES) : 2,
     jevDecisionBudgetMs: Number(env.JEV_DECISION_BUDGET_MS ?? 35000),
     psServer: env.PS_SERVER ?? 'wss://sim3.psim.us/showdown/websocket',
     psUsername: env.PS_USERNAME ?? `JevBot${Math.floor(1000 + Math.random() * 9000)}`,
@@ -115,6 +124,9 @@ export function validateConfig(cfg: AppConfig, opts: {requireApiKey?: boolean} =
   }
   if (!Number.isSafeInteger(cfg.jevAdvisorMaxTokens) || cfg.jevAdvisorMaxTokens <= 0) {
     throw new Error('JEV_ADVISOR_MAX_TOKENS 必须是正安全整数');
+  }
+  if (!Number.isSafeInteger(cfg.jevChatMaxReplies) || cfg.jevChatMaxReplies < 0) {
+    throw new Error('JEV_CHAT_MAX_REPLIES 必须是非负安全整数（0 = 禁用对手聊天应答）');
   }
   if (!Number.isSafeInteger(cfg.pikaCutoff) || cfg.pikaCutoff <= 0) {
     throw new Error('JEV_PIKA_CUTOFF 必须是正安全整数');

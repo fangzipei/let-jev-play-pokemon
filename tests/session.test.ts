@@ -5,7 +5,8 @@ import type {AdvisorClient} from '../src/jev/advisor.js';
 import {loadConfig} from '../src/config.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
 import {PsConnection, type WsLike} from '../src/ps/connection.js';
-import {PsSession, type PsSessionOptions} from '../src/ps/session.js';
+import type {ChatInput} from '../src/ps/chat.js';
+import {AI_OPPONENT_NOTICE, PsSession, type PsSessionOptions} from '../src/ps/session.js';
 import {mkDex, mkRequest} from './helpers.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -174,9 +175,14 @@ describe('PsSession', () => {
     sockets[0].message('|challstr|4|12345\n');
     await waitFor(() => sockets[0].sent.some(s => s.startsWith('|/trn ')));
     sockets[0].message('>battle-gen9championsvgc2026regmc-1\n|player|p1|JevBot1000|1|1500\n');
-    const notice = 'battle-gen9championsvgc2026regmc-1|Hi! Just letting you know: this battle is played automatically by an AI bot.';
+    const notice = `battle-gen9championsvgc2026regmc-1|${AI_OPPONENT_NOTICE}`;
     await waitFor(() => sockets[0].sent.includes(notice));
     expect(sockets[0].sent.filter(s => s === notice)).toHaveLength(1);
+  });
+
+  it('开局告知包含 AI 身份与项目开源地址', () => {
+    expect(AI_OPPONENT_NOTICE).toContain('AI');
+    expect(AI_OPPONENT_NOTICE).toContain('https://github.com/fangzipei/let-jev-play-pokemon');
   });
 
   it('每场新对局都会重新在 chat 告知对手', async () => {
@@ -186,10 +192,21 @@ describe('PsSession', () => {
     for (const id of ['battle-one', 'battle-two']) {
       sockets[0].message(`>${id}\n|player|p1|JevBot1000|1|1500\n`);
     }
-    const noticeOf = (id: string) => `${id}|Hi! Just letting you know: this battle is played automatically by an AI bot.`;
-    await waitFor(() => sockets[0].sent.filter(s => s.includes('|Hi! Just letting you know: this battle is played automatically by an AI bot.')).length === 2);
+    const noticeOf = (id: string) => `${id}|${AI_OPPONENT_NOTICE}`;
+    await waitFor(() => sockets[0].sent.filter(s => s.includes(`|${AI_OPPONENT_NOTICE}`)).length === 2);
     expect(sockets[0].sent).toContain(noticeOf('battle-one'));
     expect(sockets[0].sent).toContain(noticeOf('battle-two'));
+  });
+
+  it('对手聊天消息路由到聊天应答器', async () => {
+    const respond = vi.fn(async (_input: ChatInput) => {});
+    const {sockets, conn} = await mkHarness({}, {chat: {respond}});
+    sockets[0].message('|challstr|4|12345\n');
+    await waitFor(() => sockets[0].sent.some(s => s.startsWith('|/trn ')));
+    sockets[0].message('>battle-chat\n|player|p1|JevBot1000|1|1500\n|player|p2|foe|2|1500\n|c|☆foe|glhf\n');
+    await waitFor(() => respond.mock.calls.length === 1);
+    expect(respond.mock.calls[0][0]).toMatchObject({battleId: 'battle-chat', opponentName: 'foe', text: 'glhf'});
+    conn.close();
   });
 
   it('进入战斗房间时日志包含比赛 URL', async () => {

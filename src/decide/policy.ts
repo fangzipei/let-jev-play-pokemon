@@ -1,4 +1,4 @@
-import type {JevClient} from '../jev/client.js';
+import {callAttemptsOf, type JevClient} from '../jev/client.js';
 import type {AdvisorClient} from '../jev/advisor.js';
 import {withDeadline, CallCancelledError, DeadlineExceededError, type CallControl} from '../jev/deadline.js';
 import {buildAnalysisContext} from '../state/analysis.js';
@@ -84,6 +84,8 @@ interface DecisionRun {
   advisorLatencyMs?: number;
   advisorStatus?: 'success' | 'unavailable' | 'failed';
   totalLatencyMs?: number;
+  /** jev 失败尝试的白名单摘要（类名/HTTP 摘要）；落盘为决策记录的 call_errors */
+  callErrors?: string[];
 }
 
 function previewOpponentSpecies(state: BattleState): string[] {
@@ -331,6 +333,7 @@ function finish(
     rqid: ctx.request.rqid,
     chosen: actions,
     adjusted: run.adjusted,
+    ...(run.callErrors?.length ? {call_errors: run.callErrors} : {}),
     fallback,
     latency_ms: run.latencyMs,
     usage: run.usage,
@@ -382,6 +385,8 @@ export async function decideChoice(ctx: DecisionContext): Promise<DecisionOutcom
   } catch (err) {
     // 取消代表请求已经失效；超时仍应为当前请求及时提供本地动作。
     if (ctx.control?.signal?.aborted || ctx.tracker.state.ended || err instanceof CallCancelledError) return null;
+    const callErrors = callAttemptsOf(err);
+    if (callErrors?.length) trace.callErrors = callErrors;
     ctx.logger.warn(err instanceof DeadlineExceededError ? '决策总预算耗尽，改用本地兜底' : 'jev 决策失败，改用本地兜底');
     trace.totalLatencyMs = Date.now() - started;
     trace.actions = fallbackActions(ctx);

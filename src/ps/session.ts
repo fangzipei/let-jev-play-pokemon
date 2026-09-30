@@ -7,6 +7,7 @@ import type {MemoryData} from '../learn/store.js';
 import type {Logger} from '../log/logger.js';
 import {parseLine} from '../state/protocol.js';
 import {BattleRoom} from './battle-room.js';
+import {PROJECT_URL, type ChatResponder} from './chat.js';
 import type {PsConnection, PsMessage} from './connection.js';
 import {buildTrnCommand, getAssertion} from './login.js';
 
@@ -15,8 +16,9 @@ function battleUrl(battleId: string): string {
   return `https://play.pokemonshowdown.com/${battleId}`;
 }
 
-/** 开局在 battle 房间 chat 用英文告知对手本场由 AI 自动操作（用户要求：每场开始都要告知） */
-export const AI_OPPONENT_NOTICE = 'Hi! Just letting you know: this battle is played automatically by an AI bot.';
+/** 开局在 battle 房间 chat 用英文告知对手本场由 AI 自动操作（用户要求：每场开始都要告知；附项目开源地址） */
+export const AI_OPPONENT_NOTICE =
+  `Hi! Just letting you know: this battle is played automatically by an AI bot. Open source: ${PROJECT_URL}`;
 
 export interface PsSessionOptions {
   conn: PsConnection;
@@ -28,6 +30,8 @@ export interface PsSessionOptions {
   /** 统计先验与跨局经验（启动期加载一次，透传给每个战斗房间） */
   priors?: PriorMeta | null;
   memory?: MemoryData | null;
+  /** 对手聊天应答器（与决策链独立；不注入则忽略对手聊天） */
+  chat?: ChatResponder | null;
   packedTeam: string;
   /** 队伍被拒绝时的剥离 -Mega 重打包版本（spec 不确定项 1） */
   packedTeamFallback?: string;
@@ -100,6 +104,7 @@ export class PsSession {
         advisor: this.opts.advisor,
         priors: this.opts.priors,
         memory: this.opts.memory,
+        chat: this.opts.chat,
         logger: this.opts.logger,
         conn: this.opts.conn,
         cfg: this.opts.cfg,

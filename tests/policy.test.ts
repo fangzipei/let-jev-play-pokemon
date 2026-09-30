@@ -3,7 +3,7 @@ import type {AdvisorClient} from '../src/jev/advisor.js';
 import {resetHardDirectives} from '../src/decide/hard-directives.js';
 import {decideChoice, type DecisionContext} from '../src/decide/policy.js';
 import {parsePikaList, pikaToPriors, type PikaMeta} from '../src/dex/pikalytics.js';
-import type {DecideInput, JevClient} from '../src/jev/client.js';
+import {createJevClient, type DecideInput, type JevClient} from '../src/jev/client.js';
 import type {Answer} from '../src/jev/types.js';
 import {nullLogger, type Logger} from '../src/log/logger.js';
 import {emptyMemory} from '../src/learn/store.js';
@@ -353,6 +353,24 @@ describe('decideChoice - turn', () => {
     expect(entries[0].kind).toBe('turn');
     expect(entries[0].rqid).toBe(7);
     expect(entries[0].answers).toBeDefined();
+  });
+
+  it('jev 调用失败时把尝试明细写入决策记录', async () => {
+    const entries: Record<string, unknown>[] = [];
+    const logger: Logger = {
+      ...nullLogger,
+      decision: (_battleId, entry) => {
+        entries.push(entry);
+      },
+    };
+    const failing = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+    const ctx = mkCtx({
+      logger,
+      jev: createJevClient({apiKey: 'k', model: 'm', transport: 'fetch', fetchImpl: failing, retry: 0}),
+    });
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.fallback).toBe(true);
+    expect(entries[0].call_errors).toEqual(['TypeError']);
   });
 });
 

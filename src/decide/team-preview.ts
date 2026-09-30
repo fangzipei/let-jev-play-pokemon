@@ -90,9 +90,9 @@ export function buildPreviewQuestions(input: {
 
   const megaHolders = input.request.side.pokemon.filter(p => isMegaCapable(input.dex, p)).length;
   const megaAdvice = megaHolders >= 2
-    ? ` Your team has ${megaHolders} Mega-capable Pokemon; only one can Mega Evolve per battle, so bring exactly one of them and use the other slot for a different answer - a second Mega-capable Pokemon wastes a slot.`
+    ? ` Your team has ${megaHolders} Mega-capable Pokemon; only one can Mega Evolve per battle. Bring exactly one of them in every battle: bringing zero gives up your Mega entirely, and bringing both wastes a slot. If both matchups look poor against this opponent's preview, still bring the better of the two and use your other three slots for the matchup answers.`
     : megaHolders === 1
-      ? ' Your team has one Mega-capable Pokemon; include it in your four so you keep the option to Mega Evolve.'
+      ? ' Your team has one Mega-capable Pokemon; include it in your four in every battle: leaving it out gives up your Mega entirely. If its matchup looks poor against this opponent, still bring it and use your other three slots for the matchup answers.'
       : '';
   // 对手预览自带入场天气时：提示用我方天气手覆盖（不必是 Mega 进化者），优先级高于 one-Mega 指导
   const foeWeatherSetters = input.opponentPreviewSpecies.filter(species => hasEntryWeatherSetter(input.dex, species));

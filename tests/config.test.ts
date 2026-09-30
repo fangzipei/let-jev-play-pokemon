@@ -161,6 +161,30 @@ describe('Pikalytics 与复盘配置', () => {
   });
 });
 
+describe('聊天应答配置', () => {
+  it('默认值：deepseek v4.1 flash、复用主 key、每局最多 2 条', () => {
+    expect(loadConfig(base)).toMatchObject({
+      jevChatModel: 'deepseek/deepseek-v4.1-flash', jevChatApiKey: 'sk-test', jevChatMaxReplies: 2,
+    });
+  });
+  it('显式覆盖；专属 key 留空或空白回退主 key；模型留空回退默认', () => {
+    expect(loadConfig({...base, JEV_CHAT_MODEL: 'x/y', JEV_CHAT_MAX_REPLIES: '3'}))
+      .toMatchObject({jevChatModel: 'x/y', jevChatMaxReplies: 3});
+    expect(loadConfig({...base, JEV_CHAT_API_KEY: ' ck '}).jevChatApiKey).toBe('ck');
+    expect(loadConfig({...base, JEV_CHAT_API_KEY: '   '}).jevChatApiKey).toBe('sk-test');
+    expect(loadConfig({...base, JEV_CHAT_MODEL: '', JEV_CHAT_MAX_REPLIES: ''}).jevChatModel)
+      .toBe('deepseek/deepseek-v4.1-flash');
+    expect(loadConfig({...base, JEV_CHAT_MAX_REPLIES: ' '}).jevChatMaxReplies).toBe(2);
+  });
+  it('JEV_CHAT_MAX_REPLIES 必须是非负安全整数（0 = 禁用），否则启动拒绝', () => {
+    expect(loadConfig({...base, JEV_CHAT_MAX_REPLIES: '0'}).jevChatMaxReplies).toBe(0);
+    for (const value of ['-1', 'NaN', 'Infinity', 'abc', '1.5']) {
+      expect(() => loadConfig({...base, JEV_CHAT_MAX_REPLIES: value}), `JEV_CHAT_MAX_REPLIES=${value}`)
+        .toThrow(/JEV_CHAT_MAX_REPLIES/);
+    }
+  });
+});
+
 describe('Pokechamdb 使用率缓存配置', () => {
   it('默认值', () => {
     expect(loadConfig(base)).toMatchObject({chamdbDir: '.cache/pokechamdb', chamdbTtlHours: 24});

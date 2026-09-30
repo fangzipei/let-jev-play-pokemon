@@ -187,15 +187,17 @@ describe('三类构造器复用分析', () => {
     const legacy = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard']});
     expect(legacy.descriptionByKey.slot_1).not.toContain('estimated speed');
   });
-  it('L2 preview 引导 mega：两枚持有者提示只带一个，另一槽位换补位答案', () => {
+  it('L2 preview 引导 mega：两枚持有者要求每局恰带一只，零只与两只都否决，并给出对位都差时的取舍', () => {
     const request = mkRequest();
     const analysis = buildAnalysisContext({dex, request, state: mkTracker().state, level: 2});
     const instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis}).questions.lead_1.instructions;
     expect(instructions).toMatch(/2 Mega-capable/i);
     expect(instructions).toMatch(/exactly one/i);
+    expect(instructions).toMatch(/zero gives up your Mega/i);
     expect(instructions).toMatch(/wastes a slot/i);
+    expect(instructions).toMatch(/still bring the better of the two/i);
   });
-  it('L2 preview 引导 mega：单枚持有者提示带入；L1 不带该引导', () => {
+  it('L2 preview 引导 mega：单枚持有者要求每局带入并给出对位差时的取舍；L1 不带该引导', () => {
     const single = mkRequest();
     single.side.pokemon[3].item = 'leftovers';
     const state = mkTracker().state;
@@ -203,6 +205,8 @@ describe('三类构造器复用分析', () => {
     const l2Instructions = buildPreviewQuestions({dex, request: single, opponentPreviewSpecies: ['Charizard'], analysis: l2}).questions.bring_4.instructions;
     expect(l2Instructions).toMatch(/one Mega-capable/i);
     expect(l2Instructions).toMatch(/include it/i);
+    expect(l2Instructions).toMatch(/leaving it out gives up your Mega/i);
+    expect(l2Instructions).toMatch(/still bring it/i);
     const request = mkRequest();
     const l1 = buildAnalysisContext({dex, request, state, level: 1});
     const l1Instructions = buildPreviewQuestions({dex, request, opponentPreviewSpecies: ['Charizard'], analysis: l1}).questions.lead_1.instructions;

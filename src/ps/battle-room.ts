@@ -10,6 +10,7 @@ import type {Logger} from '../log/logger.js';
 import {parseLine, toId} from '../state/protocol.js';
 import {parseRequest, type BattleRequest} from '../state/request.js';
 import {BattleTracker} from '../state/tracker.js';
+import {buildChatFacts, type ChatResponder} from './chat.js';
 import type {PsConnection} from './connection.js';
 
 export interface BattleSummary {
@@ -29,6 +30,8 @@ export interface BattleRoomOptions {
   dex: DexData;
   jev: JevClient | null;
   advisor?: AdvisorClient | null;
+  /** 对手聊天应答器（与决策链完全独立；不注入则忽略对手聊天） */
+  chat?: ChatResponder | null;
   /** 统计先验与跨局经验（启动期加载一次，由会话透传） */
   priors?: PriorMeta | null;
   memory?: MemoryData | null;
@@ -45,6 +48,7 @@ const MAX_CHOICE_RETRIES = 1;
  * - 相同 JSON 只答一次；更新的 request 会取消旧决策（generation 机制）
  * - |error|[Invalid choice] 后用本地启发式重发修正指令（服务器不会重发 request）；重试用尽后发 default
  * - |error|[Invalid choice] 连续 3 次后本场固定用本地启发式
+ * - |c| 对手发言转发给聊天应答器（异步、与决策链完全独立）
  * - |win| / |tie| / |deinit| 触发结束汇总
  */
 export class BattleRoom {
@@ -98,6 +102,9 @@ export class BattleRoom {
         this.handleRequest(payload);
         break;
       }
+      case 'c':
+        this.handleChatLine(parsed.args);
+        break;
       case 'error':
         this.handleError(parsed.args.join('|'));
         break;
@@ -182,6 +189,27 @@ export class BattleRoom {
       return;
     }
     void this.decideAndSend(request, this.generation, control);
+  }
+
+  /** 仅响应对面玩家的聊天消息；fire-and-forget 交给应答器（内部完全兜底）。 */
+  private handleChatLine(args: string[]): void {
+    const chat = this.opts.chat;
+    if (!chat) return;
+    const ourSideId = this.tracker.state.ourSideId;
+    if (!ourSideId) return;
+    const opponentName = this.tracker.state.sides[ourSideId === 'p1' ? 'p2' : 'p1']?.name;
+    if (!opponentName) return;
+    const sender = args[0] ?? '';
+    if (toId(sender) !== toId(opponentName)) return;
+    const text = args.slice(1).join('|');
+    if (!text.trim()) return;
+    void chat.respond({
+      battleId: this.opts.battleId,
+      ourName: this.opts.ourName,
+      opponentName,
+      text,
+      facts: buildChatFacts(this.tracker.state),
+    });
   }
 
   private async decideAndSend(request: BattleRequest, generation: number, control: CallControl): Promise<void> {
