@@ -66,6 +66,18 @@ describe('queryForOpponent', () => {
     expect(queryForOpponent(null, ['Sneasler'])).toEqual({bySpecies: {}, cores: []});
     expect(queryForOpponent(emptyMemory(), ['Sneasler'])).toEqual({bySpecies: {}, cores: []});
   });
+  it('物种条注入最新至多 3 条 note，其余仅存库', () => {
+    const data = emptyMemory();
+    mergeObservation(data, obs());
+    data.species.sneasler.notes = ['n1', 'n2', 'n3', 'n4'];
+    const text = queryForOpponent(data, ['Sneasler']).bySpecies.sneasler.join(' ');
+    expect(text).toContain('notes: n1 | n2 | n3');
+    expect(text).not.toContain('n4');
+    const single = emptyMemory();
+    mergeObservation(single, obs());
+    single.species.sneasler.notes = ['only'];
+    expect(queryForOpponent(single, ['Sneasler']).bySpecies.sneasler.join(' ')).toContain('note: only');
+  });
 });
 
 describe('applyModelNotes', () => {
@@ -74,12 +86,13 @@ describe('applyModelNotes', () => {
     mergeObservation(data, obs());
     data.species.sneasler.notes = ['old'];
     const result = applyModelNotes(data, {
-      species: {Sneasler: ['old', 'new A', 'new A', 'new B', 'new C', 'new D'], Unknownmon: ['lost']},
+      species: {Sneasler: ['old', 'new A', 'new A', 'new B', 'new C', 'new D', 'new E', 'new F', 'new G', 'new H', 'new I'],
+        Unknownmon: ['lost']},
       cores: {'Sneasler + Rillaboom': ['core lesson']},
     });
-    expect(result).toEqual({received: 8, added: 4, duplicates: 2, unmatched: 1, discarded: 1,
+    expect(result).toEqual({received: 13, added: 9, duplicates: 2, unmatched: 1, discarded: 1,
       unmatchedKeys: ['species:Unknownmon']});
-    expect(data.species.sneasler.notes).toEqual(['new A', 'new B', 'new C']);
+    expect(data.species.sneasler.notes).toEqual(['new A', 'new B', 'new C', 'new D', 'new E', 'new F', 'new G', 'new H']);
     expect(data.cores['rillaboom+sneasler'].notes).toEqual(['core lesson']);
     expect(applyModelNotes(data, {species: {Sneasler: ['new A']}, cores: {}}).added).toBe(0);
   });
@@ -88,8 +101,8 @@ describe('applyModelNotes', () => {
     const data = emptyMemory();
     mergeObservation(data, obs());
     const result = applyModelNotes(data, {species: {Sneasler: [' A ', 'B'], sneasler: ['A', 'C', 'D']}, cores: {}});
-    expect(result).toMatchObject({received: 5, added: 3, duplicates: 1, discarded: 1});
-    expect(data.species.sneasler.notes).toEqual(['A', 'B', 'C']);
+    expect(result).toMatchObject({received: 5, added: 4, duplicates: 1, discarded: 0});
+    expect(data.species.sneasler.notes).toEqual(['A', 'B', 'C', 'D']);
   });
 
   it('仅允许当前日志中的物种新增无统计经验记录，不把昵称旧记录迁移过去', () => {

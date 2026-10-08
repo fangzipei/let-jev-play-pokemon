@@ -135,6 +135,14 @@ describe('reviewMemories', () => {
     expect(calls).toBe(1);
   });
 
+  it('模型每键可返回多条教训，一次写入并按上限保留', async () => {
+    const dirs = await scaffold();
+    const fetchImpl = (async () => modelResponse({species: {Sneasler: ['lesson A', 'lesson B']}, cores: {}})) as typeof fetch;
+    const report = await reviewMemories({...dirs, ...MODEL, fetchImpl});
+    expect(report.modelApplication).toMatchObject({received: 2, added: 2, duplicates: 0, unmatched: 0});
+    expect((await loadMemory(dirs.memoryDir)).species.sneasler.notes).toEqual(['lesson A', 'lesson B']);
+  });
+
   it.each([{}, [], null, {species: {Sneasler: 'wrong'}}, {species: {Sneasler: [' ']}}, {cores: []}].map(content => [content]))(
     '格式错误不冒充空经验成功：%j', async content => {
       const dirs = await scaffold();

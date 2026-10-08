@@ -4,7 +4,7 @@ import {DAMAGE_CAVEAT, estimateRevealedIncoming, findOurPokemon, type AnalysisCo
 import type {OpponentNoteSet} from './opponent-notes.js';
 import {buildBattleContext, seenInBattle} from './battle-context.js';
 import {toId} from './protocol.js';
-import {activeEntries, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
+import {activeEntries, conditionPercent, speciesOf, type BattleRequest, type RequestPokemon} from './request.js';
 import {speedControlOf, turnsPhrase, type SpeedControl} from './speed-control.js';
 import type {BattleState, PokemonState} from './tracker.js';
 
@@ -52,14 +52,18 @@ export function opponentActives(dex: DexData, state: BattleState): OpponentActiv
     }));
 }
 
+/** 场上是否激活精神场地（fieldConditions 保存协议原文，如 'move: Psychic Terrain'） */
+function psychicTerrainActive(fieldConditions: string[]): boolean {
+  return fieldConditions.some(field => toId(field.replace(/^move:\s*/i, '')) === 'psychicterrain');
+}
+
 /**
  * 对手在场、处首个行动窗口（刚上场）且已揭示 Fake Out 的威胁物种；
  * 精神场地已激活时 Fake Out 无法命中地面目标，不再计为威胁。
  */
 export function fakeOutThreats(state: BattleState): string[] {
   const oppSideId = state.ourSideId === 'p1' ? 'p2' : 'p1';
-  const psychicTerrain = state.fieldConditions.some(field => toId(field.replace(/^move:\s*/i, '')) === 'psychicterrain');
-  if (psychicTerrain) return [];
+  if (psychicTerrainActive(state.fieldConditions)) return [];
   return (state.sides[oppSideId]?.pokemon ?? [])
     .filter(p => p.activePos >= 0 && !p.fainted
       && p.switchInTurn !== undefined && state.turn - p.switchInTurn <= 1
@@ -190,6 +194,18 @@ export function buildStatePayload({state, request, dex, analysis, opponentNotes,
   };
 }
 
+/** 对手很可能有（已揭示确定 / L2+ 统计先验推测）、且本回合足以一击打倒使用者的招式 */
+export interface LethalThreat {
+  foeSpecies: string;
+  move: string;
+  /** 该招式对使用者的粗估伤害（占当前 HP 的 %） */
+  percent: number;
+  /** true = 本局已揭示（确定携带）；false = 统计先验推测 */
+  revealed: boolean;
+  /** 先验条目的使用率（%），仅 revealed=false 时携带 */
+  priorPercent?: number;
+}
+
 export interface MoveOptionInput {
   dex: DexData;
   moveId: string;
@@ -243,6 +259,8 @@ export interface MoveOptionInput {
   physicalFoes?: number;
   /** 使用者的完整招式 id 列表：Coil 的命中收益、催眠术的强化配合等组合注解按此判定 */
   attackerMoves?: string[];
+  /** 可能一击打倒使用者的对手招式（已揭示确定或 L2+ 先验推测）：保护类选项据此引导考虑守住 */
+  lethalThreats?: LethalThreat[];
 }
 
 /** Last Respects 真实威力：50 基础 + 每名已阵亡队友 50（PS basePowerCallback） */
@@ -306,6 +324,17 @@ export function megaStoneSwapRisk(
   if (target.consumedItem) return null;
   if (target.item) return forms.some(f => toId(f.requiredItem ?? '') === toId(target.item!)) ? 'certain' : null;
   return 'likely';
+}
+
+/**
+ * 击掌奇袭（普通系）对幽灵目标无效：无伤害也不畏缩，除非使用者有 Scrappy；
+ * 无目标数据时不判定（不猜测）；所有已知目标均为幽灵才拦截建议。
+ */
+function fakeOutGhostBlocked(input: MoveOptionInput): boolean {
+  if (toId(input.attackerAbility ?? '') === 'scrappy') return false;
+  const targets = input.targets?.length ? input.targets : input.target ? [input.target] : [];
+  if (!targets.length) return false;
+  return targets.every(t => speciesTypes(input.dex, t.species).some(type => toId(type) === 'ghost'));
 }
 
 /** move 选项级战术注解：全部由真实机制与当前对局数据驱动，不设物种白名单 */
@@ -425,16 +454,65 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
   }
   if (moveId === 'fakeout') {
     if (input.firstActionSinceSwitchIn === true) {
-      notes.push("Fake Out works only on the user's first action since entering the field, and this is that action: it flinches one foe at +3 priority if it lands");
+      if (psychicTerrainActive(input.fieldConditions ?? [])) {
+        notes.push("Fake Out works only on the user's first action since entering the field, and this is that action, but it is blocked while Psychic Terrain is active: grounded targets are immune to priority moves, so this Fake Out cannot flinch or damage a grounded foe — choose a different action unless the target is airborne");
+      } else if (fakeOutGhostBlocked(input)) {
+        notes.push("Fake Out works only on the user's first action since entering the field, and this is that action, but it cannot affect this Ghost-type target: Fake Out is a Normal-type move, so a Ghost foe takes no damage and is not flinched — the window would be wasted; choose a different action, or the other foe if that one can be hit");
+      } else {
+        notes.push("Fake Out works only on the user's first action since entering the field, and this is that action: it flinches one foe at +3 priority if it lands — prioritize Fake Out now: it denies one foe its whole turn, which is usually worth more than attacking with this slot");
+      }
     } else if (input.firstActionSinceSwitchIn === false) {
       notes.push('Fake Out will fail now: this Pokemon has already spent its first action since entering the field');
     }
   }
   const choiceName = CHOICE_ITEMS[toId(input.attackerItem ?? '')];
-  if (input.firstActionSinceSwitchIn === true && choiceName) {
+  // 保护类招式：讲究道具会被锁招（不要守住）；有致死威胁时引导直接守住（危险优先于速度优势）；否则无控速且速度占优时引导继续攻击（多出手）
+  if (PROTECT_LIKE_MOVES.has(moveId) && choiceName) {
+    notes.push(`${choiceName} locks this Pokemon into the first move it uses — do not use ${input.moveName} now: it would lock this Pokemon into a protective move and waste its attacking turns until it switches out; keep attacking, or switch out to reset the lock`);
+  } else if (PROTECT_LIKE_MOVES.has(moveId)) {
+    const dangerNote = protectDangerNote(input);
+    if (dangerNote) notes.push(dangerNote);
+    else {
+      const speedNote = protectSpeedNote(input);
+      if (speedNote) notes.push(speedNote);
+    }
+  } else if (input.firstActionSinceSwitchIn === true && choiceName) {
     notes.push(`${choiceName} locks this Pokemon into the first move it uses until it switches out; this choice decides its role for this stint`);
   }
   return notes;
+}
+
+/**
+ * 保护类招式的致死威胁结论：对手很可能有的招式（已揭示 = 确定；L2+ 统计先验 = 推测）本回合
+ * 足以一击打倒使用者时，引导直接考虑守住（危险优先于速度优势）。数据由调用方按同口径伤害
+ * 估算判定（pct ≥ 当前 HP%）后传入；无威胁时不生成。
+ */
+function protectDangerNote(input: MoveOptionInput): string | null {
+  const threats = input.lethalThreats ?? [];
+  if (!threats.length) return null;
+  const items = threats.map(t => t.revealed
+    ? `foe ${t.foeSpecies} has revealed ${t.move} (≈${t.percent}% on this Pokemon)`
+    : `foe ${t.foeSpecies} commonly runs ${t.move} (${t.priorPercent !== undefined ? `${t.priorPercent.toFixed(1)}% prior; ` : ''}≈${t.percent}% on this Pokemon)`);
+  return `warning: a lethal hit is likely — ${items.join('; ')}; consider Protecting this turn: it resolves before these hits and blocks them, keeping this Pokemon alive, whereas attacking now risks being knocked out before it acts`;
+}
+
+/**
+ * 保护类招式的速度优势结论：无任何控速且我方估速不低于全部相关对手的中性满速档位时，
+ * 直接给出先手事实并引导继续攻击而非守住（高速多出手）。速度未知、任一相关对手档位未知
+ * 或速度不占优时不生成，不猜测。
+ */
+function protectSpeedNote(input: MoveOptionInput): string | null {
+  const control = input.speedControl;
+  if (control?.trick_room || control?.our_tailwind || control?.opponent_tailwind) return null;
+  const analysis = input.analysis;
+  if (!analysis || input.attackerSlot === undefined) return null;
+  const ownSpeed = analysis.ourSpeeds.find(s => s.slot === input.attackerSlot)?.speed ?? null;
+  if (ownSpeed === null) return null;
+  const scoped = speedScopeFoes(input, analysis);
+  const tiers = scoped.flatMap(foe => foe.baseSpeed == null ? [] : [{species: foe.species, tier: neutralSpeedTier(foe.baseSpeed)}]);
+  if (!tiers.length || tiers.length !== scoped.length) return null;
+  if (!tiers.every(t => t.tier <= ownSpeed)) return null;
+  return `your estimated speed ${ownSpeed} would act before ${tiers.map(t => `${t.species} (neutral full-investment ${t.tier})`).join(', ')} — keep attacking rather than Protecting: being faster means the turn is better spent dealing damage than stalling`;
 }
 
 /**
@@ -631,6 +709,21 @@ const ENTRY_SET_EFFECTS: Record<string, string> = {
   snowwarning: 'on entry this Pokemon re-sets snow, overwriting the current weather',
 };
 
+/**
+ * 换入致死警示：换入者当前血量挡不住对手很可能有的招式（已揭示 = 确定；L2+ 统计先验 = 推测）时，
+ * 提醒换入即倒并引导更安全的选择。数据由调用方按同口径伤害估算判定（pct ≥ 当前 HP%）后传入；无威胁时不生成。
+ */
+function switchLethalNote(input: {pokemon: RequestPokemon; forced?: boolean; lethalThreats?: LethalThreat[]}): string | null {
+  const threats = input.lethalThreats ?? [];
+  if (!threats.length) return null;
+  const hp = conditionPercent(input.pokemon.condition);
+  const items = threats.map(t => t.revealed
+    ? `foe ${t.foeSpecies} has revealed ${t.move} (≈${t.percent}% vs this Pokemon's current ${hp}% HP)`
+    : `foe ${t.foeSpecies} commonly runs ${t.move} (${t.priorPercent !== undefined ? `${t.priorPercent.toFixed(1)}% prior; ` : ''}≈${t.percent}% vs this Pokemon's current ${hp}% HP)`);
+  return `warning: this switch-in can be knocked out before it can act — ${items.join('; ')}; ${
+    input.forced ? 'prefer a different switch-in if a safer one exists' : 'prefer a different switch-in or action if a safer line exists'}`;
+}
+
 export function describeSwitchOption(input: {
   dex: DexData;
   pokemon: RequestPokemon;
@@ -641,6 +734,8 @@ export function describeSwitchOption(input: {
   weather?: string;
   /** 对手在场的 Fake Out 威胁物种（fakeOutThreats 结果）：换入精神场地手时给“挡招”注解 */
   fakeOutGuard?: string[];
+  /** 换入者当前血量挡不住的对手招式（同口径估算）：换入即倒警示；由调用方判定（pct ≥ 当前 HP%）后传入 */
+  lethalThreats?: LethalThreat[];
   /** 当前槽位在场者的状态：换出收益注解（自愿换人时传入；强制换人时无意义） */
   outgoing?: {species: string; yawning?: boolean; hpPercent?: number; boosts?: Record<string, number>;
     /** 灭歌倒计时剩余回合（perishN 的 N）：换下即可重置 */
@@ -688,7 +783,8 @@ export function describeSwitchOption(input: {
   const risks = incoming.map(i => `incoming ${i.roughPercent === null ? 'unknown' : `≈${i.roughPercent}%`} from ${i.foeSpecies} (revealed moves only${i.unknownMoves.length ? `; unknown: ${i.unknownMoves.join(', ')}` : ''})`);
   // 手动换人必须提醒代价：换入者本回合不能行动，会先吃打向该槽位的攻击（可能少血甚至被击倒）
   const manualCost = input.forced ? [] : ['the switch-in cannot act this turn and will take any attacks aimed at this slot'];
-  return [head, ...entryNotes, ...outgoingNotes, ...manualCost, ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
+  const lethalNote = switchLethalNote(input);
+  return [head, ...entryNotes, ...outgoingNotes, ...manualCost, ...(lethalNote ? [lethalNote] : []), ...risks, ...(risks.length ? [DAMAGE_CAVEAT] : []),
     ...analysisPokemonText(input.analysis, input.pokemon.ident, input.teamSlot)].filter(Boolean).join('; ');
 }
 

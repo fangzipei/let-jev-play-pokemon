@@ -513,7 +513,26 @@ describe('BattleRoom 真实 policy 集成（仅替换 advisor/jev 客户端）',
 
 describe('BattleRoom 非法指令恢复', () => {
   it('收到 [Invalid choice] 后用本地启发式重发修正指令（同 rqid）', async () => {
+    const corrected: DecisionOutcome = {...decision, command: '/choose switch 3, pass|9'};
+    const decide = vi.spyOn(policy, 'decideChoice').mockResolvedValueOnce(decision).mockResolvedValueOnce(corrected);
     const {room, sent} = mkHarness();
+    room.handleLine(switchRequestLine(9));
+    await waitFor(() => sent.length === 1);
+    expect(sent[0]).toBe('/choose switch 3, switch 4|9');
+
+    room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
+    await waitFor(() => sent.length === 2);
+    expect(decide.mock.calls[1][0].jev).toBeNull(); // 重试改用本地启发式，不再调用模型
+    expect(sent[1]).toBe('/choose switch 3, pass|9');
+
+    // 重试次数用尽后发 default，绝不让计时器判负
+    room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
+    await waitFor(() => sent.length === 3);
+    expect(sent[2]).toBe('/choose default');
+  });
+
+  it('重试产出相同指令时直接发送 default（避免重发同款非法指令）', async () => {
+    const {room, sent} = mkHarness(); // 真实本地启发式：同一请求的 fallback 是确定性的
     room.handleLine(switchRequestLine(9));
     await waitFor(() => sent.length === 1);
     expect(sent[0]).toBe('/choose switch 3, switch 4|9');
@@ -523,12 +542,7 @@ describe('BattleRoom 非法指令恢复', () => {
 
     room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
     await waitFor(() => sent.length === 2);
-    expect(sent[1]).toBe('/choose switch 3, switch 4|9');
-
-    // 重试次数用尽后发 default，绝不让计时器判负
-    room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
-    await waitFor(() => sent.length === 3);
-    expect(sent[2]).toBe('/choose default');
+    expect(sent[1]).toBe('/choose default');
   });
 
   it('"too late" 错误不触发重发，也不依赖服务器补发 request', async () => {
@@ -538,6 +552,26 @@ describe('BattleRoom 非法指令恢复', () => {
     room.handleLine('|error|[Invalid choice] Sorry, too late to make a different move; the next turn has already started');
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(sent.length).toBe(1);
+  });
+
+  it('同一发送间隔内的重复拒绝只计一次错误（不触发启发式锁定）', async () => {
+    const jevDecide = vi.fn<JevClient['decide']>(async () => ({answers: {}, usage: {}, latencyMs: 1, raw: {}}));
+    const jev: JevClient = {decide: jevDecide};
+    const decide = vi.spyOn(policy, 'decideChoice').mockResolvedValue(decision);
+    const {room, sent} = mkHarness({jev});
+    room.handleLine(switchRequestLine(9));
+    await waitFor(() => sent.length === 1);
+    // too late 清空 pending → 后续错误不再触发重试，三条错误同属一个发送间隔
+    room.handleLine('|error|[Invalid choice] Sorry, too late to make a different move; the next turn has already started');
+    await flush();
+    room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
+    await flush();
+    room.handleLine("|error|[Invalid choice] Can't switch: The Pokémon in slot 3 can only switch in once");
+    await flush();
+    // 只计一次 → 未锁定启发式：新请求仍带 jev 正常决策
+    room.handleLine(switchRequestLine(10));
+    await waitFor(() => decide.mock.calls.length >= 2);
+    expect(decide.mock.calls.at(-1)![0].jev).toBe(jev);
   });
 });
 

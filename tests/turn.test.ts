@@ -281,6 +281,33 @@ describe('buildTurnPlans', () => {
     expect(fresh[1].options.map(o => o.key)).toContain('move_4');
   });
 
+  it('唯一可用招是连续保护招时保底提供（Encore 锁招场景避免零选项）', () => {
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p1b: Chandelure|Protect|p1b: Chandelure');
+    tracker.handleLine('|turn|2');
+    const request = mkRequest();
+    for (const mv of request.active![1].moves) mv.disabled = true;
+    request.active![1].moves[3].disabled = false; // Encore 只解锁上回合用过的 Protect
+    const plans = buildTurnPlans({dex, request, tracker});
+    const slot2 = plans.find(p => p.slot === 2);
+    expect(slot2?.options.map(o => o.key)).toContain('move_4');
+  });
+
+  it('需换人槽位多于可用替补时提供 pass 选项（避免两槽位必答同一只）', () => {
+    const request = mkRequest();
+    request.active = undefined;
+    request.forceSwitch = [true, true];
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '0 fnt'}; // 替补只剩 Tyranitar
+    const plans = buildSwitchPlans({dex, request, tracker: mkTracker()});
+    expect(plans.map(p => p.options.map(o => o.key))).toEqual([['switch_3', 'pass'], ['switch_3', 'pass']]);
+    // 替补数量足够时不提供 pass（保持强制换人语义）
+    const full = mkRequest();
+    full.active = undefined;
+    full.forceSwitch = [true, true];
+    const fullPlans = buildSwitchPlans({dex, request: full, tracker: mkTracker()});
+    expect(fullPlans.every(p => !p.options.some(o => o.key === 'pass'))).toBe(true);
+  });
+
   it('间隔一回合后恢复提供守住选项（stall 计数已清除）', () => {
     const tracker = mkTracker();
     tracker.handleLine('|move|p1b: Chandelure|Protect|p1b: Chandelure');
@@ -343,6 +370,7 @@ describe('buildTurnPlans', () => {
     const plans = buildTurnPlans({dex, request, tracker, analysis});
     const fakeOut = plans[0].options.find(o => o.key === 'move_1_foe_a');
     expect(fakeOut?.label).toMatch(/first action since entering the field/);
+    expect(fakeOut?.label).toMatch(/prioritize Fake Out/);
     expect(fakeOut?.label).toMatch(/Choice Scarf locks this Pokemon into/);
     const lastRespects = plans[0].options.find(o => o.key === 'move_2_foe_a');
     expect(lastRespects?.label).toMatch(/≈100 BP/);
@@ -590,5 +618,103 @@ describe('场上简报注入', () => {
     const option = plans[0].options.find(o => o.key === 'switch_3');
     expect(option?.label).toContain('Fake Out');
     expect(option?.label).toContain('Psychic Terrain');
+  });
+});
+
+describe('致死威胁引导保护', () => {
+  it('对手已揭示的致死招式让保护选项引导考虑守住', () => {
+    const request = mkRequest();
+    request.side.pokemon[1] = {...request.side.pokemon[1], condition: '30/135'};
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Brave Bird|p1b: Chandelure');
+    const plans = buildTurnPlans({dex, request, tracker});
+    const protect = plans[1].options.find(o => o.key === 'move_4');
+    expect(protect?.label).toContain('foe Charizard has revealed Brave Bird');
+    expect(protect?.label).toContain('≈63% on this Pokemon');
+    expect(protect?.label).toContain('consider Protecting this turn');
+  });
+
+  it('L2+ 统计先验可推测致死招式，L1 保持不引入先验', () => {
+    const request = mkRequest();
+    request.side.pokemon[1] = {...request.side.pokemon[1], condition: '30/135'};
+    const tracker = mkTracker();
+    const priors = {
+      label: 'test-priors 2026-09',
+      bySpecies: {charizard: {items: [], abilities: [], moves: [{name: 'Brave Bird', percent: 45.2}], leads: []}},
+    };
+    const analysisL2 = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const protectL2 = buildTurnPlans({dex, request, tracker, analysis: analysisL2, priors})[1].options.find(o => o.key === 'move_4');
+    expect(protectL2?.label).toContain('foe Charizard commonly runs Brave Bird (45.2% prior');
+    expect(protectL2?.label).toContain('consider Protecting this turn');
+    const analysisL1 = buildAnalysisContext({dex, request, state: tracker.state, level: 1});
+    const protectL1 = buildTurnPlans({dex, request, tracker, analysis: analysisL1, priors})[1].options.find(o => o.key === 'move_4');
+    expect(protectL1?.label).not.toMatch(/consider Protecting/);
+    expect(protectL1?.label).not.toContain('Brave Bird');
+  });
+
+  it('伤害未达到当前 HP 时不引导守住', () => {
+    const request = mkRequest();
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Brave Bird|p1b: Chandelure');
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(plans[1].options.find(o => o.key === 'move_4')?.label).not.toMatch(/consider Protecting/);
+  });
+});
+
+describe('换入致死警示', () => {
+  it('换入者当前血量挡不住已揭示招式时给换入即倒警示，扛得住的不给', () => {
+    const request = mkRequest();
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '40/170'};
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Brave Bird|p1b: Chandelure');
+    const plans = buildTurnPlans({dex, request, tracker});
+    const salamence = plans[0].options.find(o => o.key === 'switch_4');
+    expect(salamence?.label).toContain('warning: this switch-in can be knocked out before it can act');
+    expect(salamence?.label).toContain("foe Charizard has revealed Brave Bird (≈58% vs this Pokemon's current 24% HP)");
+    expect(salamence?.label).toContain('prefer a different switch-in or action if a safer line exists');
+    const tyranitar = plans[0].options.find(o => o.key === 'switch_3');
+    expect(tyranitar?.label).not.toMatch(/knocked out before it can act/);
+  });
+  it('L2+ 先验可推测换入致死并标注使用率，L1 不引入先验', () => {
+    const request = mkRequest();
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '40/170'};
+    const tracker = mkTracker();
+    const priors = {
+      label: 'test-priors 2026-09',
+      bySpecies: {charizard: {items: [], abilities: [], moves: [{name: 'Brave Bird', percent: 45.2}], leads: []}},
+    };
+    const l2 = buildAnalysisContext({dex, request, state: tracker.state, level: 2});
+    const salamenceL2 = buildTurnPlans({dex, request, tracker, analysis: l2, priors})[0].options.find(o => o.key === 'switch_4');
+    expect(salamenceL2?.label).toContain("foe Charizard commonly runs Brave Bird (45.2% prior; ≈58% vs this Pokemon's current 24% HP)");
+    const l1 = buildAnalysisContext({dex, request, state: tracker.state, level: 1});
+    const salamenceL1 = buildTurnPlans({dex, request, tracker, analysis: l1, priors})[0].options.find(o => o.key === 'switch_4');
+    expect(salamenceL1?.label).not.toMatch(/knocked out before it can act/);
+    expect(salamenceL1?.label).not.toMatch(/commonly runs/);
+  });
+  it('强制换人的替补同样计算致死警示，提示选择更安全的换入', () => {
+    const request = mkRequest({forceSwitch: [true, false]});
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '40/170'};
+    const tracker = mkTracker();
+    tracker.handleLine('|move|p2b: Charizard|Brave Bird|p1b: Chandelure');
+    const plans = buildSwitchPlans({dex, request, tracker});
+    const salamence = plans[0].options.find(o => o.key === 'switch_4');
+    expect(salamence?.label).toContain('warning: this switch-in can be knocked out before it can act');
+    expect(salamence?.label).toContain("foe Charizard has revealed Brave Bird (≈58% vs this Pokemon's current 24% HP)");
+    expect(salamence?.label).toContain('prefer a different switch-in if a safer one exists');
+    const tyranitar = plans[0].options.find(o => o.key === 'switch_3');
+    expect(tyranitar?.label).not.toMatch(/knocked out before it can act/);
+  });
+});
+
+describe('击掌奇袭精神场地窗口', () => {
+  it('精神场地激活时击掌奇袭选项标注先制封锁', () => {
+    const request = mkRequest();
+    request.active![0].moves[0] = {move: 'Fake Out', id: 'fakeout', pp: 10, maxpp: 10, target: 'normal'};
+    request.side.pokemon[0].moves = ['fakeout', 'ironhead', 'leechlife', 'suckerpunch'];
+    const tracker = mkTracker();
+    tracker.handleLine('|-fieldstart|move: Psychic Terrain|[of] p2a: Victreebel');
+    const fakeOut = buildTurnPlans({dex, request, tracker})[0].options.find(o => o.key === 'move_1_foe_a');
+    expect(fakeOut?.label).toMatch(/Psychic Terrain is active/);
+    expect(fakeOut?.label).not.toMatch(/prioritize Fake Out/);
   });
 });

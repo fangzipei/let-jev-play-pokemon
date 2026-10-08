@@ -81,11 +81,16 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
       && PROTECT_LIKE_MOVES.has(toId(tracked.lastMoveId ?? ''));
     const types = speciesTypes(dex, speciesOf(me));
     let best: {index: number; target?: string; score: number} | null = null;
+    // 被“连续保护”过滤掉的首个保护类候选：其它招式全部不可用时保底用它（Encore 锁招等场景）
+    let skippedProtect: {index: number; target?: string; score: number} | null = null;
     for (let j = 0; j < reqActive.moves.length; j++) {
       const mv = reqActive.moves[j];
       if (mv.disabled || mv.pp <= 0) continue;
       // 上一回合用过保护类招式 → 本回合不再考虑（连续保护不可靠，避免连续守住）
-      if (chainedProtect && PROTECT_LIKE_MOVES.has(toId(mv.id))) continue;
+      if (chainedProtect && PROTECT_LIKE_MOVES.has(toId(mv.id))) {
+        skippedProtect ??= {index: j + 1, score: 0.9};
+        continue;
+      }
       const move = dex.moves[toId(mv.id)];
       const spread = mv.target === 'allAdjacentFoes' || mv.target === 'allAdjacent';
       // CHOOSABLE_TARGETS（sim/battle-actions.ts）：这些 target 在双打必须写出目标位，否则服务器报 needs a target
@@ -140,11 +145,13 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
       else target = undefined; // 其余 target 一律不写（写了会被服务器拒绝）
       if (!best || score > best.score) best = {index: j + 1, target, score};
     }
-    if (!best) {
+    // 保护类被连续保护过滤且其它招式不可用 → 保底发被锁保护招；slot-default 会让整条指令退化成 default 混发（服务器拒绝）
+    const chosen = best ?? skippedProtect;
+    if (!chosen) {
       actions.push({kind: 'slot-default', slot});
       continue;
     }
-    actions.push({kind: 'move', slot, moveIndex: best.index, target: best.target});
+    actions.push({kind: 'move', slot, moveIndex: chosen.index, target: chosen.target});
   }
   return actions;
 }

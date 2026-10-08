@@ -81,6 +81,11 @@ export function validateActions(actions: ChooseAction[], request?: BattleRequest
       }
     }
   }
+  // default 只能作为整条指令发送；“default, move X” 会被服务器拒绝（more choices than unfainted Pokémon）
+  if (actions.some(a => a.kind === 'slot-default') &&
+      actions.some(a => a.kind === 'move' || a.kind === 'switch' || a.kind === 'pass')) {
+    problems.push('不能与 default 混发（default 必须整条发送）');
+  }
   if (megaCount > 1) problems.push(`一次只能 Mega 一只，当前 ${megaCount} 只`);
   return problems;
 }

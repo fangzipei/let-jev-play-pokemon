@@ -488,14 +488,34 @@ describe('describeMoveOption 战术注解', () => {
     });
     expect(text).toMatch(/vs Foe A \(Metagross, 100% HP\)/);
   });
-  it('击掌奇袭按窗口状态区分可用提示与失败警告', () => {
+  it('击掌奇袭按窗口状态区分可用提示与失败警告，窗口内建议优先使用', () => {
     const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
       attackerTypes: ['Fire', 'Dark'], target: foe};
     const open = describeMoveOption({...base, firstActionSinceSwitchIn: true});
     expect(open).toMatch(/first action since entering the field/);
     expect(open).toMatch(/flinch/i);
+    expect(open).toMatch(/prioritize Fake Out/);
+    expect(open).toMatch(/denies one foe its whole turn/);
     const closed = describeMoveOption({...base, firstActionSinceSwitchIn: false});
     expect(closed).toMatch(/will fail/);
+    expect(closed).not.toMatch(/prioritize Fake Out/);
+  });
+  it('精神场地激活时击掌奇袭标注地面目标免疫先制、不再建议优先使用', () => {
+    const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
+      attackerTypes: ['Fire', 'Dark'], target: foe};
+    const blocked = describeMoveOption({...base, firstActionSinceSwitchIn: true, fieldConditions: ['move: Psychic Terrain']});
+    expect(blocked).toMatch(/Psychic Terrain is active/);
+    expect(blocked).toMatch(/grounded/);
+    expect(blocked).not.toMatch(/prioritize Fake Out/);
+  });
+  it('击掌奇袭对幽灵目标不再建议优先（普通系无效），Scrappy 持有者仍建议优先', () => {
+    const base = {dex, moveId: 'fakeout', moveName: 'Fake Out', pp: 10, maxpp: 10,
+      attackerTypes: ['Fire', 'Dark'], target: {label: 'Foe A', species: 'Chandelure', hpPercent: 100}};
+    const ghost = describeMoveOption({...base, firstActionSinceSwitchIn: true});
+    expect(ghost).toMatch(/cannot affect this Ghost-type target/);
+    expect(ghost).not.toMatch(/prioritize Fake Out/);
+    const scrappy = describeMoveOption({...base, firstActionSinceSwitchIn: true, attackerAbility: 'Scrappy'});
+    expect(scrappy).toMatch(/prioritize Fake Out/);
   });
   it('讲究道具持有者在首个行动回合标注锁招后果', () => {
     const base = {dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
@@ -564,6 +584,35 @@ describe('describeSwitchOption', () => {
     const forced = describeSwitchOption({dex, pokemon: request.side.pokemon[2], opponentActives: [], forced: true});
     expect(forced).not.toContain('cannot act this turn');
     expect(forced).toContain('forced replacement');
+  });
+  it('换入致死警示：已揭示招式按当前血量标出换入即倒并引导更安全选择', () => {
+    const request = mkRequest();
+    request.side.pokemon[3].condition = '40/170';
+    const text = describeSwitchOption({
+      dex, pokemon: request.side.pokemon[3], opponentActives: [],
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 58, revealed: true}],
+    });
+    expect(text).toContain('warning: this switch-in can be knocked out before it can act');
+    expect(text).toContain("foe Charizard has revealed Brave Bird (≈58% vs this Pokemon's current 24% HP)");
+    expect(text).toContain('prefer a different switch-in or action if a safer line exists');
+  });
+  it('换入致死警示：先验推测标注使用率；无威胁不输出；强制换人提示选择更安全的换入', () => {
+    const request = mkRequest();
+    request.side.pokemon[3].condition = '40/170';
+    const prior = describeSwitchOption({
+      dex, pokemon: request.side.pokemon[3], opponentActives: [],
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 58, revealed: false, priorPercent: 45.2}],
+    });
+    expect(prior).toContain("foe Charizard commonly runs Brave Bird (45.2% prior; ≈58% vs this Pokemon's current 24% HP)");
+    const none = describeSwitchOption({dex, pokemon: request.side.pokemon[3], opponentActives: [], lethalThreats: []});
+    expect(none).not.toMatch(/knocked out before it can act/);
+    request.side.pokemon[2].condition = '20/175';
+    const forced = describeSwitchOption({
+      dex, pokemon: request.side.pokemon[2], opponentActives: [], forced: true,
+      lethalThreats: [{foeSpecies: 'Victreebel', move: 'Sludge Bomb', percent: 30, revealed: true}],
+    });
+    expect(forced).toContain('warning: this switch-in can be knocked out before it can act');
+    expect(forced).toContain('prefer a different switch-in if a safer one exists');
   });
   it('换入者的入场特性：重设场地/天气是抢回控制权的手段', () => {
     const request = mkRequest();
@@ -1314,6 +1363,134 @@ describe('控速下的出手顺序结论', () => {
     expect(label).not.toContain('Sneasler (neutral full-investment');
     expect(label).not.toContain('would act before Sneasler');
     expect(label).not.toContain('Sneasler base speed');
+  });
+});
+
+describe('保护类招式的锁招与速度注解', () => {
+  const protectBase = {dex, moveId: 'protect', moveName: 'Protect', pp: 10, maxpp: 10, attackerTypes: ['Ghost', 'Fire']};
+  const analysisWith = (ourSpeed: number | null) => {
+    const analysis = buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 1});
+    analysis.ourSpeeds[0].speed = ourSpeed;
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    return analysis;
+  };
+  const withControl = (partial: Partial<SpeedControl>): SpeedControl => ({...emptySpeedControl, ...partial});
+  const protectOption = (extra: Partial<Parameters<typeof describeMoveOption>[0]> = {}) => describeMoveOption({
+    ...protectBase, attackerSlot: 1, activeFoes: ['p2: Victreebel'], ...extra,
+  });
+
+  it('讲究道具持有者的保护类招式标注禁止守住与锁招后果', () => {
+    const scarf = describeMoveOption({...protectBase, attackerItem: 'Choice Scarf'});
+    expect(scarf).toContain('Choice Scarf locks this Pokemon into the first move it uses — do not use Protect now');
+    expect(scarf).toContain('keep attacking, or switch out to reset the lock');
+    for (const item of ['Choice Band', 'Choice Specs']) {
+      expect(describeMoveOption({...protectBase, attackerItem: item}))
+        .toContain(`${item} locks this Pokemon into the first move it uses — do not use Protect now`);
+    }
+    // 首行动窗口与非首行动窗口都只保留这一条合并注，不再叠加通用锁招注
+    const both = describeMoveOption({...protectBase, attackerItem: 'Choice Scarf', firstActionSinceSwitchIn: true});
+    expect(both).toContain('do not use Protect now');
+    expect((both.match(/locks this Pokemon into/g) ?? []).length).toBe(1);
+    expect(both).not.toMatch(/this choice decides its role/);
+  });
+
+  it('无讲究道具或非保护类招式时不输出禁止守住注解', () => {
+    expect(describeMoveOption(protectBase)).not.toMatch(/do not use Protect/);
+    const attack = describeMoveOption({
+      dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
+      attackerTypes: ['Water'], attackerStats: {spa: 150}, attackerItem: 'Choice Scarf', firstActionSinceSwitchIn: true,
+    });
+    expect(attack).toContain('Choice Scarf locks this Pokemon into the first move it uses until it switches out');
+    expect(attack).not.toMatch(/do not use/);
+  });
+
+  it('无控速且速度占优时保护类招式引导继续攻击而非守住', () => {
+    const label = protectOption({analysis: analysisWith(200)});
+    expect(label).toContain('your estimated speed 200 would act before Victreebel (neutral full-investment 172)');
+    expect(label).toContain('keep attacking rather than Protecting');
+    const attack = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+      analysis: analysisWith(200), attackerSlot: 1, activeFoes: ['p2: Victreebel'],
+    });
+    expect(attack).not.toMatch(/keep attacking rather than Protecting/);
+  });
+
+  it('速度不占优、控速激活或速度未知时不给继续攻击的引导', () => {
+    expect(protectOption({analysis: analysisWith(36)})).not.toMatch(/keep attacking rather than Protecting/);
+    for (const control of [
+      withControl({trick_room: {started_turn: 3, turns_left: 2}}),
+      withControl({our_tailwind: {started_turn: 2, turns_left: 2}}),
+      withControl({opponent_tailwind: {started_turn: 2, turns_left: 2}}),
+    ]) {
+      expect(protectOption({analysis: analysisWith(400), speedControl: control}))
+        .not.toMatch(/keep attacking rather than Protecting/);
+    }
+    expect(protectOption({analysis: analysisWith(null)})).not.toMatch(/keep attacking rather than Protecting/);
+  });
+
+  it('任一相关对手速度档位未知时不给继续攻击的引导（不猜测）', () => {
+    const analysis = analysisWith(400);
+    analysis.oppSpeedEstimates.find(s => s.species === 'Charizard')!.baseSpeed = null;
+    expect(protectOption({analysis, activeFoes: ['p2: Victreebel', 'p2: Charizard']}))
+      .not.toMatch(/keep attacking rather than Protecting/);
+  });
+});
+
+describe('保护类招式的致死威胁注解', () => {
+  const protectBase = {dex, moveId: 'protect', moveName: 'Protect', pp: 10, maxpp: 10, attackerTypes: ['Ghost', 'Fire']};
+  const analysisWith = (ourSpeed: number | null) => {
+    const analysis = buildAnalysisContext({dex, request: mkRequest(), state: mkTracker().state, level: 1});
+    analysis.ourSpeeds[0].speed = ourSpeed;
+    analysis.oppSpeedEstimates[0].baseSpeed = 120;
+    return analysis;
+  };
+  const protectOption = (extra: Partial<Parameters<typeof describeMoveOption>[0]> = {}) => describeMoveOption({
+    ...protectBase, attackerSlot: 1, activeFoes: ['p2: Victreebel'], ...extra,
+  });
+
+  it('对手已揭示的致死招式引导考虑守住', () => {
+    const label = protectOption({
+      attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(label).toContain('warning: a lethal hit is likely');
+    expect(label).toContain('foe Charizard has revealed Brave Bird (≈63% on this Pokemon)');
+    expect(label).toContain('consider Protecting this turn');
+    expect(label).toContain('attacking now risks being knocked out before it acts');
+  });
+
+  it('统计先验推测的致死招式标注使用率与 prior 来源', () => {
+    const label = protectOption({
+      attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: false, priorPercent: 45.2}],
+    });
+    expect(label).toContain('foe Charizard commonly runs Brave Bird (45.2% prior; ≈63% on this Pokemon)');
+    expect(label).toContain('consider Protecting this turn');
+  });
+
+  it('致死威胁优先于速度优势：不再输出继续攻击的引导', () => {
+    const label = protectOption({
+      attackerHpPercent: 22,
+      analysis: analysisWith(200),
+      lethalThreats: [{foeSpecies: 'Victreebel', move: 'Sludge Bomb', percent: 80, revealed: false, priorPercent: 30.1}],
+    });
+    expect(label).toContain('consider Protecting this turn');
+    expect(label).not.toMatch(/keep attacking rather than Protecting/);
+  });
+
+  it('无致死威胁时不输出考虑守住的引导', () => {
+    expect(protectOption({analysis: analysisWith(200)})).not.toMatch(/consider Protecting/);
+    expect(describeMoveOption(protectBase)).not.toMatch(/consider Protecting/);
+  });
+
+  it('讲究道具持有者即使面临致死威胁也只保留不守住的锁招注解', () => {
+    const label = describeMoveOption({
+      ...protectBase, attackerItem: 'Choice Scarf', attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(label).toContain('do not use Protect now');
+    expect(label).not.toMatch(/consider Protecting/);
   });
 });
 

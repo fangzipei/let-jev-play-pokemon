@@ -81,7 +81,7 @@ describe('fallbackTurnActions', () => {
     expect(fresh.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 1});
   });
 
-  it('连续保护跳过时不回退到保护（无其他可用招式时走 slot-default）', () => {
+  it('连续保护跳过导致零候选时保底使用被锁保护招（不走 slot-default）', () => {
     const request = mkRequest();
     request.active![0].moves = [
       {move: 'Protect', id: 'protect', pp: 8, maxpp: 8, target: 'self'},
@@ -90,9 +90,9 @@ describe('fallbackTurnActions', () => {
     const chained = mkTracker();
     chained.handleLine('|move|p1a: Golisopod|Protect|p1a: Golisopod');
     chained.handleLine('|turn|2');
-    // 降权实现会回退到 Protect（0.1）；跳过实现没有候选 → slot-default
+    // 首选仍跳过保护类；但跳过导致零候选时保底发被锁招——Encore 锁招场景下 default 混发会被服务器拒绝
     const actions = fallbackTurnActions({dex, request, tracker: chained});
-    expect(actions.find(a => 'slot' in a && a.slot === 1)).toMatchObject({kind: 'slot-default'});
+    expect(actions.find(a => a.kind === 'move' && a.slot === 1)).toMatchObject({moveIndex: 1});
   });
 
   it('间隔一回合后兜底恢复优先保护类招式（stall 计数已清除）', () => {

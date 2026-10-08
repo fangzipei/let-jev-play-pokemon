@@ -463,6 +463,58 @@ describe('decideChoice - force switch', () => {
     expect(outcome?.adjusted).toContain('adjusted:switch_slot_2: switch_4');
     expect(outcome?.fallback).toBe(false);
   });
+
+  it('唯一替补被两槽位争抢时降级为 pass（无替代可换）', async () => {
+    const request = mkRequest();
+    request.active = undefined;
+    request.forceSwitch = [true, true];
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '0 fnt'}; // 替补只剩 Tyranitar
+    const ctx = mkCtx({
+      request,
+      jev: mkJev({
+        switch_slot_1: {type: 'choice', choice: 'switch_3', confidence: 0.9},
+        switch_slot_2: {type: 'choice', choice: 'switch_3', confidence: 0.9},
+      }),
+    });
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose switch 3, pass|7');
+    expect(outcome?.adjusted).toContain('adjusted:switch_slot_2: pass');
+    expect(outcome?.fallback).toBe(false);
+  });
+
+  it('唯一替补 + pass 组合答案直接合法发出（问题集提供 pass 出口）', async () => {
+    const request = mkRequest();
+    request.active = undefined;
+    request.forceSwitch = [true, true];
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '0 fnt'};
+    const ctx = mkCtx({
+      request,
+      jev: mkJev({
+        switch_slot_1: {type: 'choice', choice: 'switch_3', confidence: 0.9},
+        switch_slot_2: {type: 'choice', choice: 'pass', confidence: 0.9},
+      }),
+    });
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose switch 3, pass|7');
+    expect(outcome?.adjusted).not.toContain('missing:switch_slot_2');
+    expect(outcome?.fallback).toBe(false);
+  });
+
+  it('回合内唯一替补被两槽位争抢时降级为该槽位最高分合法动作', async () => {
+    const request = mkRequest();
+    request.side.pokemon[3] = {...request.side.pokemon[3], condition: '0 fnt'}; // 替补只剩 Tyranitar
+    const ctx = mkCtx({
+      request,
+      jev: mkJev({
+        action_slot_1: {type: 'choice', choice: 'switch_3', confidence: 0.8},
+        action_slot_2: {type: 'choice', choice: 'switch_3', confidence: 0.5, probabilities: {switch_3: 0.6, move_2: 0.3, move_1_foe_a: 0.1}},
+      }),
+    });
+    const outcome = await decideChoice(ctx);
+    expect(outcome?.command).toBe('/choose switch 3, move 2|7');
+    expect(outcome?.adjusted).toContain('adjusted:action_slot_2: move_2');
+    expect(outcome?.fallback).toBe(false);
+  });
 });
 
 describe('对手注解与经验注入接线', () => {

@@ -92,7 +92,7 @@ L2 起每只对手宝可梦在 `state` 中带上 `notes`（仅非空字段出现
 
 - **pokechamdb 统计先验（默认）**：`npm run chamdb:refresh` 把双打前 N 名（默认 100）物种的使用率分布（items/abilities/moves）与站点英文效果说明（notes）持久化到 `JEV_CHAMDB_DIR`；play 启动只读本地缓存，对局期零站点访问。先验条目带 `(prior: pokechamdb <season> <format> <date>)` 来源标记，与局内已确认信息严格区分；moves/abilities/items 附使用时占比与效果 gloss，Mega 石按所配形态（X/Y/Z）校验避免多形态误配；该来源暂无首发倾向（leads），preview 不产生对应的先验行。缓存缺失或不足时静默降级。
 - **Pikalytics 先验（已停用）**：2026-09-24 起默认关闭（`JEV_PIKA_ENABLED=1` 可临时恢复，经适配器输出同一先验结构）。原行为：play 启动时按 `PS_FORMAT` 与 `JEV_PIKA_CUTOFF` 拉取使用率榜单，详情端点顺序节流补全；缓存按 dataDate 存放于 `JEV_PIKA_DIR`（赛制不符不作为有效结果，仅网络完全不可用时退回最新缓存），preview 附对手首发倾向（leads 占比 top-3）。任何拉取失败都静默降级；先验是统计概括，不代表对手实际配置。
-- **跨局经验库**：`npm run review` 扫描 `LOG_DIR` 下的 protocol 日志增量入 `JEV_MEMORY_DIR/memory.json`（规则统计按 battleId 幂等去重），按物种与两两组合累计对局数、胜负与已揭示配置；配置 `JEV_REVIEW_MODEL` 时再由模型提炼模式级经验：默认不发送 `max_tokens`（不限制推理与输出），让模型自由推理后按严格 JSON 输出（每物种/组合至多保留 3 条）。review 不自动执行，`--dry-run` 不写库、不调用模型。
+- **跨局经验库**：`npm run review` 扫描 `LOG_DIR` 下的 protocol 日志增量入 `JEV_MEMORY_DIR/memory.json`（规则统计按 battleId 幂等去重），按物种与两两组合累计对局数、胜负与已揭示配置；配置 `JEV_REVIEW_MODEL` 时再由模型提炼模式级经验：默认不发送 `max_tokens`（不限制推理与输出），让模型自由推理后按严格 JSON 输出（每键 1~3 条教训，库内每物种/组合至多保留 8 条、新的优先；注入时每对手至多 5 行、物种条带最新 3 条）。review 不自动执行，`--dry-run` 不写库、不调用模型。
 - **模型补跑与计数**：模型进度独立于规则统计；失败或键匹配异常保持待复盘，下一次普通 `review` 自动补跑，成功批次逐批保存。合法空结果标记为“未发现可重复模式”，不反复付费重试；格式错误不会伪装成 0 条成功。日志区分返回、实际新增、重复、未匹配和超限丢弃数量。
 - **旧库兼容**：旧库没有模型进度，默认不自动重跑历史对局。`--retry-model` 显式重新提炼全部可读取的有效日志（包括已成功的对局，会产生模型调用费用），不重复累计战绩，可先与 `--dry-run` 合用预览。历史昵称统计不猜测迁移；日志确认的正确物种若缺少统计记录，可单独保存经验并标记“配置统计不可用”。
 

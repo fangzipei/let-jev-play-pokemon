@@ -102,11 +102,23 @@ export interface MemoryCoreLine {key: string; text: string}
 
 export interface MemoryQueryResult {bySpecies: Record<string, string[]>; cores: MemoryCoreLine[]}
 
+/** 库内每键保留的 note 上限（新的优先）；旧教训不再因少量新写入立刻被顶掉。 */
+export const NOTES_CAP = 8;
+/** 物种条注入的 note 上限（取最新若干条）。 */
+export const NOTES_INJECT = 3;
+
+/** 物种条/无统计条的经验片段：单条 `; note: X`，多条 `; notes: X | Y | Z`。 */
+function notesSuffix(notes: string[]): string {
+  const picks = notes.slice(0, NOTES_INJECT);
+  if (!picks.length) return '';
+  return picks.length === 1 ? `; note: ${picks[0]}` : `; notes: ${picks.join(' | ')}`;
+}
+
 /** 对手物种列表 → 注入用经验条（物种 ≤limit.species、组合 ≤limit.cores）。 */
 export function queryForOpponent(
   data: MemoryData | null,
   speciesList: string[],
-  limits = {species: 6, cores: 3},
+  limits = {species: 6, cores: 5},
 ): MemoryQueryResult {
   if (!data) return {bySpecies: {}, cores: []};
   const unique = [...new Set(speciesList.map(toId))].filter(Boolean);
@@ -118,14 +130,13 @@ export function queryForOpponent(
     .slice(0, limits.species);
   for (const [key, record] of ranked) {
     if (record.seen === 0) {
-      bySpecies[key] = [`${record.name}: review lesson (configuration statistics unavailable); note: ${record.notes[0]}`];
+      bySpecies[key] = [`${record.name}: review lesson (configuration statistics unavailable)${notesSuffix(record.notes)}`];
       continue;
     }
     const itemNames = topName(record.items, 2);
     const abilityNames = topName(record.abilities, 1);
     const summary = [...itemNames, ...abilityNames].join(' + ') || 'no consistent configuration observed';
-    const note = record.notes[0] ? `; note: ${record.notes[0]}` : '';
-    bySpecies[key] = [`${record.name} (${record.seen} battles seen): usually ${summary}${note}`];
+    bySpecies[key] = [`${record.name} (${record.seen} battles seen): usually ${summary}${notesSuffix(record.notes)}`];
   }
   const coreHits: Array<{key: string; record: CoreRecord}> = [];
   for (let i = 0; i < unique.length; i++) {
@@ -161,7 +172,7 @@ export function emptyModelApplication(): ModelNoteApplication {
   return {received: 0, added: 0, duplicates: 0, unmatched: 0, discarded: 0, unmatchedKeys: []};
 }
 
-/** 模型复盘产物合并：每物种/组合 ≤3 条，新的优先保留。 */
+/** 模型复盘产物合并：每物种/组合 ≤NOTES_CAP 条，新的优先保留。 */
 export function applyModelNotes(
   data: MemoryData,
   notes: {species: Record<string, string[]>; cores: Record<string, string[]>},
@@ -206,7 +217,7 @@ export function applyModelNotes(
       else if (previous.has(note) || fresh.has(note)) result.duplicates++;
       else fresh.add(note);
     }
-    record.notes = [...fresh, ...previous].slice(0, 3);
+    record.notes = [...fresh, ...previous].slice(0, NOTES_CAP);
     const added = record.notes.filter(n => !previous.has(n)).length;
     result.added += added;
     result.discarded += fresh.size - added;

@@ -511,6 +511,9 @@ export function spreadThreatLines(priors: PriorMeta | null | undefined, speciesL
     });
 }
 
+/** 每个对手注入的经验行上限（物种条 1 行 + 组合条若干）。 */
+const MEMORY_LINES_LIMIT = 5;
+
 export function buildOpponentNotes(input: OpponentNotesInput): Record<string, OpponentNoteSet> {
   const oppSide = opponentSideId(input.state, input.ourSideId);
   const recent = recentOpponentActions(input.state, input.ourSideId);
@@ -525,7 +528,7 @@ export function buildOpponentNotes(input: OpponentNotesInput): Record<string, Op
     const coreLines = query
       ? query.cores.filter(core => core.key.split('+').includes(key)).map(core => core.text)
       : [];
-    const memoryLines = query ? [...(query.bySpecies[key] ?? []), ...coreLines].slice(0, 3) : [];
+    const memoryLines = query ? [...(query.bySpecies[key] ?? []), ...coreLines].slice(0, MEMORY_LINES_LIMIT) : [];
     out[p.ident] = {
       confirmed: confirmedNotes(input.state, p),
       recent_actions: recent.get(p.ident) ?? [],

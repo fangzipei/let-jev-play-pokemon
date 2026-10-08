@@ -394,7 +394,7 @@ describe('buildOpponentNotes 控速预警', () => {
   });
 });
 
-import {emptyMemory, mergeObservation, type MemoryData} from '../src/learn/store.js';
+import {coreKey, emptyMemory, mergeObservation, type MemoryData} from '../src/learn/store.js';
 import type {BattleObservation} from '../src/learn/extract.js';
 
 const OBS: BattleObservation = {
@@ -406,17 +406,31 @@ const OBS: BattleObservation = {
 };
 
 describe('buildOpponentNotes memory（跨局经验）', () => {
-  it('物种条与配队条挂到对应对手，上限 3 条', () => {
+  it('物种条与配队条挂到对应对手，多条教训合并注入（至多 3 条）', () => {
     const memory = emptyMemory();
     mergeObservation(memory, OBS);
+    memory.species.sneasler.notes = ['lesson one', 'lesson two', 'lesson three', 'lesson four'];
     const tracker = mkTracker();
     const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', memory});
     const sneasler = notes['p2: Sneasler'].memory.join(' | ');
     expect(sneasler).toContain('Sneasler (1 battles seen)');
     expect(sneasler).toContain('Grassy Seed');
+    expect(sneasler).toContain('notes: lesson one | lesson two | lesson three');
+    expect(sneasler).not.toContain('lesson four');
     expect(sneasler).toContain('core (1 battles seen)');
-    expect(notes['p2: Sneasler'].memory.length).toBeLessThanOrEqual(3);
     expect(notes['p2: Victreebel'].memory).toEqual([]);
+  });
+  it('每个对手至多 5 行：物种条 1 行 + 组合条 4 行', () => {
+    const memory = emptyMemory();
+    mergeObservation(memory, OBS);
+    const foes = ['Victreebel', 'Charizard', 'Kingambit', 'Whimsicott'];
+    foes.forEach((foe, i) => {
+      memory.cores[coreKey('Sneasler', foe)] = {seen: 20 - i, wins: 10, losses: 10, notes: []};
+    });
+    const tracker = mkTracker();
+    const notes = buildOpponentNotes({state: tracker.state, ourSideId: 'p1', memory});
+    expect(notes['p2: Sneasler'].memory).toHaveLength(5);
+    expect(notes['p2: Sneasler'].memory[0]).toContain('Sneasler (1 battles seen)');
   });
   it('memory 为 null 或空库时不输出', () => {
     const tracker = mkTracker();

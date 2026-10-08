@@ -61,6 +61,10 @@ export class BattleRoom {
   /** 最近一次已发送指令的 request；用于被拒后重发修正指令 */
   private pendingRequest: BattleRequest | null = null;
   private pendingRetries = 0;
+  /** 最近一次实际发给服务器的指令；重试产出同款时直接改发 default */
+  private lastSentCommand: string | null = null;
+  /** 当前发送间隔内是否已计过一次非法错误；发送新指令时重置 */
+  private errorCountedSinceLastSend = false;
   private summary: BattleSummary;
   private resolveFinished!: (summary: BattleSummary) => void;
   private finishedPromise: Promise<BattleSummary>;
@@ -251,12 +255,16 @@ export class BattleRoom {
   private handleError(text: string): void {
     this.opts.logger.warn(`[${this.opts.battleId}] |error| ${text}`);
     if (text.includes('[Invalid choice]')) {
-      this.illegalErrors++;
-      if (this.illegalErrors >= 3 && !this.heuristicMode) {
-        this.heuristicMode = true;
-        this.opts.logger.warn(
-          `[${this.opts.battleId}] 连续 ${this.illegalErrors} 次非法指令，本场后续固定使用本地启发式`,
-        );
+      // 同一发送间隔内的重复拒绝（服务器常为一条指令回多个 error）只计一次，避免误触发启发式锁定
+      if (!this.errorCountedSinceLastSend) {
+        this.errorCountedSinceLastSend = true;
+        this.illegalErrors++;
+        if (this.illegalErrors >= 3 && !this.heuristicMode) {
+          this.heuristicMode = true;
+          this.opts.logger.warn(
+            `[${this.opts.battleId}] 连续 ${this.illegalErrors} 次非法指令，本场后续固定使用本地启发式`,
+          );
+        }
       }
       // "too late" 可能是旧 rqid 的迟到错误；服务器不会因此补发 request。
       // 只清除重发记录，不取消可能已在飞的新请求。
@@ -299,6 +307,12 @@ export class BattleRoom {
         cfg: this.opts.cfg,
       });
       if (!outcome || !this.isCurrent(generation)) return;
+      if (outcome.command === this.lastSentCommand) {
+        // 本地启发式对同一 request 是确定性的：重发同款只会被再次拒绝
+        this.opts.logger.warn(`[${this.opts.battleId}] 重试将重发相同指令，直接发送 default`);
+        this.sendDefault();
+        return;
+      }
       this.summary.decisions++;
       this.summary.fallbacks++;
       this.connSend(outcome.command);
@@ -330,6 +344,8 @@ export class BattleRoom {
   }
 
   private connSend(command: string): void {
+    this.lastSentCommand = command;
+    this.errorCountedSinceLastSend = false;
     this.opts.conn.send(this.opts.battleId, command);
   }
 }

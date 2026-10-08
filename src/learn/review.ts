@@ -43,7 +43,7 @@ Think through all battles carefully before answering: look for repeating opponen
 Rules:
 - Species keys must be copied exactly from the "Opponent species seen" list at the end of the input; never invent names.
 - Core keys must be copied from the "Opponent cores seen" list, formatted "SpeciesA+SpeciesB".
-- Each value is an array with exactly one short, concrete, actionable English lesson (one sentence) grounded in the battles above.
+- Each value is an array of one to three short, concrete, actionable English lessons (one sentence each), grounded in the battles above; add a second or third only for a distinct pattern worth acting on.
 - Include an entry only when a real pattern repeats across the battles; when unsure, leave the section empty.`;
 
 function compactBattle(obs: BattleObservation): string {
@@ -77,7 +77,7 @@ function noteScope(observations: BattleObservation[]): ModelNoteScope {
   return {species: [...species].sort(), cores: [...cores.values()].sort()};
 }
 
-/** 合法空结果与格式错误分开；格式错误可重试，不能静默丢成 0 条。 */
+/** 合法空结果与格式错误分开；格式错误可重试，不能静默丢成 0 条。每键允许 1..n 条非空教训。 */
 function parseModelNotes(parsed: unknown): ModelNotes {
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === 'object' && !Array.isArray(value);
@@ -90,10 +90,12 @@ function parseModelNotes(parsed: unknown): ModelNotes {
     const value = parsed[section];
     if (!isRecord(value)) throw new SyntaxError(`review 响应格式错误：${section} 必须为对象`);
     for (const [key, notes] of Object.entries(value)) {
-      if (!key.trim() || !Array.isArray(notes) || notes.length !== 1 || typeof notes[0] !== 'string' || !notes[0].trim()) {
-        throw new SyntaxError(`review 响应格式错误：${section} 每项必须为一个非空字符串的数组`);
+      if (!key.trim() || !Array.isArray(notes) || notes.length === 0 ||
+          !notes.every(note => typeof note === 'string' && note.trim())) {
+        throw new SyntaxError(`review 响应格式错误：${section} 每项必须为非空字符串数组（至少 1 条）`);
       }
-      Object.defineProperty(result[section], key, {value: [notes[0].trim()], enumerable: true, configurable: true, writable: true});
+      Object.defineProperty(result[section], key, {value: notes.map(note => note.trim()),
+        enumerable: true, configurable: true, writable: true});
     }
   }
   return result;

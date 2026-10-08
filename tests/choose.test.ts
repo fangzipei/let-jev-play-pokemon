@@ -68,4 +68,14 @@ describe('validateActions', () => {
     ], request);
     expect(problems.join()).toMatch(/重复/);
   });
+  it('slot-default 不能与其他动作混发（default 只可整条发送）', () => {
+    const problems = validateActions([
+      {kind: 'slot-default', slot: 1},
+      {kind: 'move', slot: 2, moveIndex: 2},
+    ]);
+    expect(problems.join()).toMatch(/default/);
+    // 单个或全体 slot-default 仍合法（渲染为整条 default）
+    expect(validateActions([{kind: 'slot-default', slot: 1}])).toEqual([]);
+    expect(validateActions([{kind: 'slot-default', slot: 1}, {kind: 'slot-default', slot: 2}])).toEqual([]);
+  });
 });

@@ -132,8 +132,8 @@ function degradeMegaConflicts(actions: ChooseAction[], picks: SlotPick[], adjust
 
 /**
  * 同一只替补不能被两个槽位同时换入（服务器 sim/side.ts 会拒绝 "can only switch in once"）。
- * 合并结果中出现重复时，后出现的槽位改用该槽位问题 probabilities（缺失时按选项顺序）中最高的未用替补；
- * 无候选时保留原动作，交给 validateActions 判定后整体兜底。
+ * 合并结果中出现重复时，后出现的槽位优先改用该槽位问题 probabilities（缺失时按选项顺序）中最高的未用替补；
+ * 无未用替补时降级为该槽位 probabilities 最高的非 switch 合法动作（pass/招式）；再无可选才保留原动作交给 validateActions。
  */
 function dedupeSwitchTargets(
   actions: ChooseAction[],
@@ -156,16 +156,25 @@ function dedupeSwitchTargets(
     const plan = plans.find(p => p.slot === action.slot);
     const answer = plan ? answers[plan.questionName] : undefined;
     const probabilities = answer && answer.type === 'choice' ? answer.probabilities ?? {} : {};
+    const rank = (a: {key: string}, b: {key: string}): number => (probabilities[b.key] ?? -1) - (probabilities[a.key] ?? -1);
     const alternative = (plan?.options ?? [])
       .filter(o => o.action.kind === 'switch' && !used.has(o.action.teamIndex))
-      .sort((a, b) => (probabilities[b.key] ?? -1) - (probabilities[a.key] ?? -1))[0];
+      .sort(rank)[0];
     if (plan && alternative && alternative.action.kind === 'switch') {
       used.add(alternative.action.teamIndex);
       adjusted.push(`adjusted:${plan.questionName}: ${alternative.key}`);
       out.push(alternative.action);
-    } else {
-      out.push(action);
+      continue;
     }
+    // 无未用替补可换（必答槽位多于替补数等）：降级为该槽位 probabilities 最高的非 switch 合法动作（pass/招式），
+    // 避免两槽位必答同一只被服务器拒绝 "can only switch in once"
+    const fallbackOption = (plan?.options ?? []).filter(o => o.action.kind !== 'switch').sort(rank)[0];
+    if (plan && fallbackOption) {
+      adjusted.push(`adjusted:${plan.questionName}: ${fallbackOption.key}`);
+      out.push(fallbackOption.action);
+      continue;
+    }
+    out.push(action);
   }
   return out;
 }

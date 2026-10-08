@@ -1,13 +1,14 @@
 import {megaFormsOf, speciesTypes, type DexData} from '../dex/index.js';
+import {priorEntryFor, type PriorMeta} from '../dex/priors.js';
 import type {ChoiceQuestion} from '../jev/types.js';
 import {findOurPokemon, type AnalysisContext} from '../state/analysis.js';
-import {entryWeatherOf, estimatedMove, megaSkinAbility, superEffectivePhrase} from '../state/calc.js';
+import {entryWeatherOf, estimateDamagePercent, estimatedMove, megaSkinAbility, neutralStatTier, superEffectivePhrase} from '../state/calc.js';
 import {toId} from '../state/protocol.js';
 import {
   activeEntries, benchEntries, conditionPercent, conditionStatus, isFainted, speciesOf, teamSlotOf,
-  type BattleRequest,
+  type BattleRequest, type RequestPokemon,
 } from '../state/request.js';
-import {describeMoveOption, describeSwitchOption, fakeOutThreats, mainAttackOf, opponentActives, PROTECT_LIKE_MOVES, type OpponentActive} from '../state/serialize.js';
+import {describeMoveOption, describeSwitchOption, fakeOutThreats, mainAttackOf, opponentActives, PROTECT_LIKE_MOVES, type LethalThreat, type OpponentActive} from '../state/serialize.js';
 import {speedControlOf, speedControlText} from '../state/speed-control.js';
 import type {BattleTracker, PokemonState} from '../state/tracker.js';
 import {BATTLE_GOAL} from './battle-goal.js';
@@ -28,7 +29,13 @@ export interface SlotSwitchAction {
   teamIndex: number;
 }
 
-export type SlotAction = SlotMoveAction | SlotSwitchAction;
+/** 该槽位不做动作（如必答槽位多于替补数时的 pass 出口） */
+export interface SlotPassAction {
+  kind: 'pass';
+  slot: 1 | 2;
+}
+
+export type SlotAction = SlotMoveAction | SlotSwitchAction | SlotPassAction;
 
 export interface SlotOption {
   /** 作为 criteria 的 key，也是 jev choice 答案的取值 */
@@ -122,6 +129,8 @@ interface TurnInput {
   request: BattleRequest;
   tracker: BattleTracker;
   analysis?: AnalysisContext;
+  /** 统计先验（pokechamdb/Pikalytics）：L2+ 时用于推测对手很可能有且足以一击打死我方的招式 */
+  priors?: PriorMeta | null;
 }
 
 interface TargetSpec {
@@ -148,6 +157,51 @@ function targetSpecsFor(target: string, slot: 1 | 2, foeCount: number): TargetSp
   }
   // self / all / allAdjacent / allAdjacentFoes / allySide / foeSide … 都不需要写目标
   return [{suffix: ''}];
+}
+
+/**
+ * 逐一对在场对手找出“很可能有且足以一击打倒我方该宝可梦”的招式：已揭示招式（确定）取最高伤害；
+ * 无致死揭示时，L2+ 按统计先验 top3（推测，排除已揭示）补足。判定与选项伤害估算同源：
+ * 攻方按对手满投资中性档位、守方按我方 request 实际数值，pct ≥ 当前 HP% 记为致死；每对手最多一条。
+ */
+export function lethalThreatsFor(
+  input: TurnInput, me: RequestPokemon, trackedSelf: PokemonState | undefined,
+  species: string, foes: OpponentActive[], ownHp: number,
+): LethalThreat[] {
+  const {dex, tracker} = input;
+  const weather = tracker.state.weather;
+  const level = input.analysis?.level ?? 0;
+  const threats: LethalThreat[] = [];
+  for (const foe of foes) {
+    const attacker = dex.species[toId(foe.species)];
+    if (!attacker) continue;
+    const baseStats = attacker.baseStats;
+    const attackerStats = Number.isFinite(baseStats?.atk) && Number.isFinite(baseStats?.spa)
+      ? {atk: neutralStatTier(baseStats.atk), spa: neutralStatTier(baseStats.spa)}
+      : undefined;
+    const estimate = (moveId: string): number | null => estimateDamagePercent({
+      dex, moveId, attackerTypes: attacker.types, attackerStats,
+      attackerBoosts: foe.boosts, attackerAbility: foe.ability ?? undefined, attackerStatus: foe.status ?? undefined,
+      defenderSpecies: species, defenderStats: me.stats, defenderBoosts: trackedSelf?.boosts, weather,
+    });
+    let best: LethalThreat | null = null;
+    for (const moveName of foe.revealedMoves) {
+      const pct = estimate(moveName);
+      if (pct === null || pct < ownHp || (best && pct <= best.percent)) continue;
+      best = {foeSpecies: foe.species, move: moveName, percent: pct, revealed: true};
+    }
+    if (!best && level >= 2 && input.priors) {
+      const seen = new Set(foe.revealedMoves.map(toId));
+      for (const prior of (priorEntryFor(input.priors, foe.species)?.moves ?? []).slice(0, 3)) {
+        if (seen.has(toId(prior.name))) continue;
+        const pct = estimate(prior.name);
+        if (pct === null || pct < ownHp || (best && pct <= best.percent)) continue;
+        best = {foeSpecies: foe.species, move: prior.name, percent: pct, revealed: false, priorPercent: prior.percent};
+      }
+    }
+    if (best) threats.push(best);
+  }
+  return threats;
 }
 
 function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentActive[]): SlotOption[] {
@@ -192,13 +246,22 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     ? undefined
     : tracker.state.turn - trackedSelf.switchInTurn <= 1;
   const faintedAllies = ourSideState?.pokemon.filter(p => p.fainted).length ?? 0;
+  const ownHpPercent = conditionPercent(me.condition);
+  // 致死威胁注解数据：对手很可能有且足以一击打倒我方该宝可梦的招式（保护类选项引导直接守住）
+  const lethalThreats = lethalThreatsFor(input, me, trackedSelf, species, foes, ownHpPercent);
   const options: SlotOption[] = [];
-
+  const usableIdx: number[] = [];
   for (let j = 0; j < reqActive.moves.length; j++) {
     const mv = reqActive.moves[j];
-    if (mv.disabled || mv.pp <= 0) continue;
-    // 上一回合用过保护类招式 → 本回合不提供该选项（连续保护不可靠，避免连续守住）
-    if (protectUsedLastTurn && PROTECT_LIKE_MOVES.has(toId(mv.id))) continue;
+    if (!mv.disabled && mv.pp > 0) usableIdx.push(j);
+  }
+  // 上一回合用过保护类招式 → 本回合不提供该选项（连续保护不可靠，避免连续守住）；
+  // 保底：过滤后零选项时放宽（Encore 锁招等场景唯一可用招正是保护招，零选项会让整个问题集为空）
+  const guardedIdx = usableIdx.filter(j => !(protectUsedLastTurn && PROTECT_LIKE_MOVES.has(toId(reqActive.moves[j].id))));
+  const allowedIdx = guardedIdx.length > 0 ? guardedIdx : usableIdx;
+
+  for (const j of allowedIdx) {
+    const mv = reqActive.moves[j];
     const moveInfo = dex.moves[toId(mv.id)];
     // 非状态招均可声明 Mega：踢倒等 basePower=0 的变威力攻击招同样生成 mega 变体；缺招式数据时不生成
     const damaging = moveInfo ? moveInfo.category !== 'Status' : false;
@@ -227,7 +290,8 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
         fieldConditions: tracker.state.fieldConditions,
         speedControl,
         faintedAllies,
-        attackerHpPercent: conditionPercent(me.condition),
+        attackerHpPercent: ownHpPercent,
+        lethalThreats,
         firstActionSinceSwitchIn,
         attackerItem: me.item,
         attackerMoves: reqActive.moves.map(entry => entry.id),
@@ -273,9 +337,12 @@ function buildSlotOptions(input: TurnInput, activeIndex: number, foes: OpponentA
     };
     for (const bench of benchEntries(request)) {
       const teamIndex = teamSlotOf(request, bench);
+      const benchSpecies = speciesOf(bench);
+      // 换入者的致死警示：替补按实际防御值与当前血量、同口径估算对手很可能有的致命招式（登场前无 boosts）
+      const benchThreats = lethalThreatsFor(input, bench, undefined, benchSpecies, foes, conditionPercent(bench.condition));
       options.push({
         key: `switch_${teamIndex}`,
-        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, weather, outgoing, fakeOutGuard}),
+        label: describeSwitchOption({dex, pokemon: bench, opponentActives: foes, analysis: input.analysis, teamSlot: teamIndex, weather, outgoing, fakeOutGuard, lethalThreats: benchThreats}),
         action: {kind: 'switch', slot, teamIndex},
       });
     }
