@@ -53,7 +53,7 @@ export function opponentActives(dex: DexData, state: BattleState): OpponentActiv
 }
 
 /** 场上是否激活精神场地（fieldConditions 保存协议原文，如 'move: Psychic Terrain'） */
-function psychicTerrainActive(fieldConditions: string[]): boolean {
+export function psychicTerrainActive(fieldConditions: string[]): boolean {
   return fieldConditions.some(field => toId(field.replace(/^move:\s*/i, '')) === 'psychicterrain');
 }
 
@@ -476,24 +476,51 @@ function moveTacticNotes(input: MoveOptionInput): string[] {
       const speedNote = protectSpeedNote(input);
       if (speedNote) notes.push(speedNote);
     }
-  } else if (input.firstActionSinceSwitchIn === true && choiceName) {
-    notes.push(`${choiceName} locks this Pokemon into the first move it uses until it switches out; this choice decides its role for this stint`);
+  } else {
+    if (input.firstActionSinceSwitchIn === true && choiceName) {
+      notes.push(`${choiceName} locks this Pokemon into the first move it uses until it switches out; this choice decides its role for this stint`);
+    }
+    // 非保护类动作：致死威胁下同样预警（受击在先、结算在后，动作可能来不及生效）；讲究道具持有者不引导守住（会被锁招），改为引导换下
+    const dangerNote = moveDangerNote(input);
+    if (dangerNote) notes.push(dangerNote);
   }
   return notes;
 }
 
 /**
- * 保护类招式的致死威胁结论：对手很可能有的招式（已揭示 = 确定；L2+ 统计先验 = 推测）本回合
- * 足以一击打倒使用者时，引导直接考虑守住（危险优先于速度优势）。数据由调用方按同口径伤害
- * 估算判定（pct ≥ 当前 HP%）后传入；无威胁时不生成。
+ * 致死威胁清单前缀（保护类与非保护类选项共用）：对手很可能有的招式（已揭示 = 确定；L2+ 统计先验 = 推测）
+ * 本回合足以一击打倒使用者；数据由调用方按同口径伤害估算判定（pct ≥ 当前 HP%）后传入，无威胁时不生成。
  */
-function protectDangerNote(input: MoveOptionInput): string | null {
+function lethalThreatWarning(input: MoveOptionInput): string | null {
   const threats = input.lethalThreats ?? [];
   if (!threats.length) return null;
   const items = threats.map(t => t.revealed
     ? `foe ${t.foeSpecies} has revealed ${t.move} (≈${t.percent}% on this Pokemon)`
     : `foe ${t.foeSpecies} commonly runs ${t.move} (${t.priorPercent !== undefined ? `${t.priorPercent.toFixed(1)}% prior; ` : ''}≈${t.percent}% on this Pokemon)`);
-  return `warning: a lethal hit is likely — ${items.join('; ')}; consider Protecting this turn: it resolves before these hits and blocks them, keeping this Pokemon alive, whereas attacking now risks being knocked out before it acts`;
+  return `warning: a lethal hit is likely — ${items.join('; ')}`;
+}
+
+/**
+ * 保护类招式的致死威胁结论：存在足以一击打倒使用者的对手招式时，引导直接考虑守住（危险优先于速度优势）。
+ */
+function protectDangerNote(input: MoveOptionInput): string | null {
+  const warning = lethalThreatWarning(input);
+  if (!warning) return null;
+  return `${warning}; consider Protecting this turn: it resolves before these hits and blocks them, keeping this Pokemon alive, whereas attacking now risks being knocked out before it acts`;
+}
+
+/**
+ * 非保护类招式（攻击/辅助）的致死威胁结论：同一威胁下选这招会在受击结算中被打倒；引导改选保护类
+ * 招式（危险优先于输出/辅助收益）或换人保命，并给出卖头权衡（被击倒不消耗行动且替补免费入场，
+ * 在场者剩余价值低时可优于手动换人）。讲究道具持有者不引导守住（Protect 会被锁招），改为引导换下。
+ */
+function moveDangerNote(input: MoveOptionInput): string | null {
+  const warning = lethalThreatWarning(input);
+  if (!warning) return null;
+  const choiceName = CHOICE_ITEMS[toId(input.attackerItem ?? '')];
+  return choiceName
+    ? `${warning}; consider switching this Pokemon out instead: Protecting would lock this Pokemon into a protective move until it switches out, and acting now risks being knocked out before this move resolves; but if this Pokemon's remaining value is low, letting it be knocked out beats a manual switch too: a knockout costs no action and brings your replacement in for free`
+    : `${warning}; consider Protecting this turn instead: it resolves before these hits and blocks them, keeping this Pokemon alive, whereas acting now risks being knocked out before this move resolves; or, if this Pokemon's remaining value is low, taking the hit is a valid trade: a knockout costs no action and brings your replacement in for free, unlike a manual switch`;
 }
 
 /**
@@ -764,7 +791,11 @@ export function describeSwitchOption(input: {
     const o = input.outgoing;
     if (o.yawning) outgoingNotes.push(`switching this slot out removes Yawn from ${o.species} before it falls asleep`);
     if (o.perish !== undefined) outgoingNotes.push(`switching this slot out resets the Perish Song countdown on ${o.species} (perish${o.perish}), saving it from fainting when the countdown reaches zero`);
-    if (o.hpPercent !== undefined && o.hpPercent <= 33) outgoingNotes.push(`${o.species} is at ${o.hpPercent}% HP: switching preserves it`);
+    if (o.hpPercent !== undefined && o.hpPercent <= 33) {
+      outgoingNotes.push(`${o.species} is at ${o.hpPercent}% HP: switching preserves it`);
+      // 卖头经济账：被击倒不消耗行动且替补免费入场——在场者剩余价值低时，送掉可优于花回合手动换人
+      outgoingNotes.push('but if its remaining value is low, letting it faint can be the better trade: a knockout costs no action and brings your replacement in for free, while this switch spends the turn and exposes the switch-in');
+    }
     const mainWeakened = o.mainAttack !== undefined && o.mainAttack.stage <= -1;
     const drops = Object.entries(o.boosts ?? {})
       .filter(([stat, v]) => v < 0 && !(mainWeakened && stat === o.mainAttack?.stat))

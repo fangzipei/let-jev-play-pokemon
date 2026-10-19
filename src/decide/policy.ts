@@ -14,8 +14,8 @@ import type {BattleState} from '../state/tracker.js';
 import {resolveKey} from './answers.js';
 import {fallbackActions, type FallbackContext} from './fallback.js';
 import {buildSwitchPlans} from './force-switch.js';
-import {applyPreviewDirectives, collectTurnDirectives, enforceTyranitarMega} from './hard-directives.js';
-import {buildPreviewQuestions, fullTeamOrder, resolvePreviewOrder} from './team-preview.js';
+import {applyPreviewDirectives, collectTurnDirectives, enforceMegaInclusion, enforceTyranitarMega} from './hard-directives.js';
+import {buildPreviewQuestions, fullTeamOrder, previewSlotScores, resolvePreviewOrder, slotRoleVector} from './team-preview.js';
 import {buildTurnPlans, type SlotAction, type SlotQuestionPlan} from './turn.js';
 
 export type DecisionKind = 'team-preview' | 'turn' | 'force-switch' | 'none';
@@ -261,14 +261,17 @@ async function runWithJev(
   trace.answers = res.answers;
   ctx.onUsage?.(res.usage, 'jev');
   if (kind === 'team-preview') {
-    const {order, adjusted} = resolvePreviewOrder(res.answers);
+    const {order, adjusted} = resolvePreviewOrder(res.answers, undefined, slotRoleVector(ctx.dex, ctx.request));
     // 硬指令 H1/H6：场地手不连续首发（跨局状态）+ 对手天气时补入班基拉斯，覆盖模型的预览顺序
     const preview = applyPreviewDirectives({dex: ctx.dex, request: ctx.request, order, opponentPreviewSpecies: opponentSpecies});
     adjusted.push(...preview.notes);
+    // 硬指令 H11：四题全部绕开 Mega 时按模型偏好分补入替补位（零 Mega 兜底；恰好一只 MEGA 的提示词约束的结构级保险）
+    const mega = enforceMegaInclusion({dex: ctx.dex, request: ctx.request, order: preview.order, slotScores: previewSlotScores(res.answers)});
+    adjusted.push(...mega.notes);
     const missingCount = adjusted.filter(a => a.startsWith('missing:')).length;
     return {
       ...trace,
-      actions: [{kind: 'team', order: fullTeamOrder(preview.order)}],
+      actions: [{kind: 'team', order: fullTeamOrder(mega.order)}],
       adjusted,
       replacedCount: order.length - missingCount,
       answers: res.answers,

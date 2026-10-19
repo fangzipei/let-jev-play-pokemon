@@ -9,6 +9,7 @@ import {
 } from '../state/request.js';
 import {opponentActives, PROTECT_LIKE_MOVES} from '../state/serialize.js';
 import type {BattleTracker} from '../state/tracker.js';
+import {applyPreviewDirectives, enforceMegaInclusion} from './hard-directives.js';
 
 export interface FallbackContext {
   dex: DexData;
@@ -16,8 +17,15 @@ export interface FallbackContext {
   tracker: BattleTracker;
 }
 
-export function fallbackTeamPreview(): ChooseAction {
-  return {kind: 'team', order: [1, 2, 3, 4, 5, 6]};
+/** 预览兜底：基础顺序 1-6 仍过 H1/H6 与零 Mega 守卫，异常路径不跳过硬指令（与 jev 决策路径同一条指令链） */
+export function fallbackTeamPreview(ctx: FallbackContext): ChooseAction {
+  const {dex, request, tracker} = ctx;
+  const oppId = tracker.state.ourSideId === 'p1' ? 'p2' : 'p1';
+  const opponentPreviewSpecies = (tracker.state.sides[oppId]?.pokemon ?? []).map(p => p.species);
+  // trace 预构建与真实兜底共用本函数；observe:false 保证不提前回写 H1 跨局状态（真正回写在 jev 预览分支）
+  const preview = applyPreviewDirectives({dex, request, order: [1, 2, 3, 4, 5, 6], opponentPreviewSpecies, observe: false});
+  const {order} = enforceMegaInclusion({dex, request, order: preview.order});
+  return {kind: 'team', order};
 }
 
 /** 每个需要换人的槽位选“血最厚、被对手属性克制最少”的存活替补 */
@@ -158,7 +166,7 @@ export function fallbackTurnActions(ctx: FallbackContext): ChooseAction[] {
 
 export function fallbackActions(ctx: FallbackContext): ChooseAction[] {
   const {request} = ctx;
-  if (request.teamPreview) return [fallbackTeamPreview()];
+  if (request.teamPreview) return [fallbackTeamPreview(ctx)];
   if (request.active) return fallbackTurnActions(ctx);
   if ((request.forceSwitch ?? []).some(Boolean)) return fallbackSwitchActions(ctx);
   return [{kind: 'default'}];

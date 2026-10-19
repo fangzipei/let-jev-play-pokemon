@@ -625,6 +625,28 @@ describe('硬指令接线', () => {
     expect(out?.adjusted.some(a => a.startsWith('hard:weather-bring'))).toBe(true);
   });
 
+  it('team-preview：四题全绕开 Mega 时按模型偏好分补入替补位并记录审计', async () => {
+    const request = mkRequest({teamPreview: true});
+    request.active = undefined;
+    request.side.pokemon = ['Indeedee', 'Milotic', 'Salamence', 'Golisopod', 'Tyranitar', 'Chandelure'].map(name => ({
+      ident: `p1: ${name}`, details: `${name}, L50, M`, condition: '100/100', active: false,
+      ...(name === 'Salamence' ? {item: 'salamencite'} : {}),
+      ...(name === 'Tyranitar' ? {item: 'tyranitarite'} : {}),
+    }));
+    const answers: Record<string, Answer> = {
+      lead_1: {type: 'choice', choice: 'slot_1'},
+      lead_2: {type: 'choice', choice: 'slot_2'},
+      bring_3: {type: 'choice', choice: 'slot_6', probabilities: {slot_6: 0.5, slot_4: 0.3, slot_3: 0.2}},
+      bring_4: {type: 'choice', choice: 'slot_4', probabilities: {slot_4: 0.5, slot_5: 0.3, slot_6: 0.2}},
+    };
+    const ctx = mkCtx({request, jev: mkJev(answers)});
+    ctx.dex = hardDex();
+    const out = await decideChoice(ctx);
+    // 四题顺序 [1,2,6,4] 零 Mega → 偏好分更高的 Tyranitar（slot 5）换入第二替补位（slot 4）
+    expect(out?.command).toBe('/choose team 126534|7');
+    expect(out?.adjusted.some(a => a.startsWith('hard:mega-required'))).toBe(true);
+  });
+
   const HYPNOSIS_LINES = [
     '|poke|p1|Milotic, L50, F|',
     '|poke|p1|Salamence, L50, M|',

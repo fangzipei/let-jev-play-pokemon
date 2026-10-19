@@ -7,7 +7,7 @@ import {
   activeEntries, conditionPercent, isFainted, speciesOf, teamSlotOf,
   type BattleRequest, type RequestPokemon,
 } from '../state/request.js';
-import {fakeOutThreats, megaStoneSwapRisk, opponentActives, type OpponentActive} from '../state/serialize.js';
+import {fakeOutThreats, isMegaCapable, megaStoneSwapRisk, opponentActives, psychicTerrainActive, type OpponentActive} from '../state/serialize.js';
 import {speedControlOf} from '../state/speed-control.js';
 import type {BattleState, BattleTracker} from '../state/tracker.js';
 import type {SlotQuestionPlan} from './turn.js';
@@ -57,6 +57,8 @@ export function applyPreviewDirectives(input: {
   order: number[];
   /** 对手预览物种（policy 从 tracker 对手侧收集）；用于判断对手能否自带天气 */
   opponentPreviewSpecies?: string[];
+  /** false 时只读跨局状态、不回写首发构成（trace/兜底等非最终决策路径，避免提前污染同一局 jev 决策的 H1 判定） */
+  observe?: boolean;
 }): PreviewDirectiveResult {
   const {dex, request} = input;
   const order = [...input.order];
@@ -88,10 +90,52 @@ export function applyPreviewDirectives(input: {
       notes.push(`hard:weather-bring: ${speciesOf(request.side.pokemon[ttIndex]!)} takes the fourth slot to contest the foe's weather`);
     }
   }
-  lastLeadHadSurgeSetter = order.slice(0, 2).some(slot => {
-    const species = speciesAt(slot);
-    return species !== null && isSurgeSetter(dex, species);
-  });
+  if (input.observe !== false) {
+    lastLeadHadSurgeSetter = order.slice(0, 2).some(slot => {
+      const species = speciesAt(slot);
+      return species !== null && isSurgeSetter(dex, species);
+    });
+  }
+  return {order, notes};
+}
+
+/**
+ * H11 零 Mega 兜底：前四位（带入四只）没有任何 Mega 可进化手时，强制补入一只。
+ * 模型四题逐题绕开 Mega 手时，选出的四只对 resolver 仍是合法组合，没有任何既有规则会修补；
+ * 本指令把"恰一带入一只 Mega"从提示词约束升级为结构级保证（只修零带：H6 天气覆盖的设计内双带不受影响）。
+ * - 只替换替补位（order[2]/order[3]），不动首发，保持已定首发与 H1 轮换语义不被打乱；
+ * - 候选与淘汰目标都按模型偏好分（四题 probabilities 逐槽最大值）比较：补入分更高的 Mega、
+ *   淘汰替补里分更低的槽位；兜底路径没有分数时按队伍顺序稳定选择（补队伍靠前的 Mega、淘汰第二替补）。
+ */
+export function enforceMegaInclusion(input: {
+  dex: DexData;
+  request: BattleRequest;
+  order: number[];
+  /** 各槽位模型偏好分（四题 probabilities 逐槽最大值）；缺省时按队伍顺序稳定选择 */
+  slotScores?: Record<number, number>;
+}): PreviewDirectiveResult {
+  const {dex, request} = input;
+  const order = [...input.order];
+  const notes: string[] = [];
+  if (order.length < 4) return {order, notes};
+  const megaSlots = request.side.pokemon
+    .map((pokemon, index) => ({slot: index + 1, capable: isMegaCapable(dex, pokemon)}))
+    .filter(entry => entry.capable)
+    .map(entry => entry.slot);
+  if (!megaSlots.length || order.slice(0, 4).some(slot => megaSlots.includes(slot))) return {order, notes};
+  const score = (slot: number): number => input.slotScores?.[slot] ?? 0;
+  const pick = [...megaSlots].sort((a, b) => score(b) - score(a) || a - b)[0]!;
+  // 只动替补位；同分时淘汰更靠后的替补（第二替补是编队里的弹性位）
+  const evictIndex = [2, 3].sort((a, b) => score(order[a]!) - score(order[b]!) || b - a)[0]!;
+  const evicted = order[evictIndex]!;
+  const at = order.indexOf(pick);
+  if (at >= 0) [order[evictIndex], order[at]] = [order[at], order[evictIndex]];
+  else order[evictIndex] = pick;
+  const label = (slot: number): string => {
+    const pokemon = request.side.pokemon[slot - 1];
+    return pokemon ? `slot ${slot} (${speciesOf(pokemon)})` : `slot ${slot}`;
+  };
+  notes.push(`hard:mega-required: ${label(pick)} replaces ${label(evicted)} - the four must include one Mega-capable Pokemon`);
   return {order, notes};
 }
 
@@ -134,6 +178,13 @@ function fastestAwakeFoe(dex: DexData, foes: OpponentActive[]): FoeTarget | null
     .filter(entry => entry.foe.status === null)
     .sort((a, b) => (b.spe ?? -1) - (a.spe ?? -1) || a.index - b.index);
   return ranked[0] ? {foe: ranked[0].foe, index: ranked[0].index} : null;
+}
+
+/** 浮空判定（精神场地只让地面目标免疫先制）：飞行属性、已揭示的 Levitate、未消耗的气球。 */
+function isAirborne(foe: OpponentActive): boolean {
+  if (foe.types.some(type => toId(type) === 'flying')) return true;
+  if (toId(foe.ability ?? '') === 'levitate') return true;
+  return toId(foe.item ?? '') === 'airballoon' && !foe.consumedItem;
 }
 
 /** 换入型指令的槽位选择：目标换入选项存在、槽位空闲且该换入 key 未被其他指令占用时，选 HP 最低的槽位。 */
@@ -238,7 +289,7 @@ function rainCoverDirective(input: {
 }
 
 /**
- * 收集本回合的硬指令（按优先级 H5 → H2 → H3 → H4 → H8 → H9，每个槽位最多一条）。
+ * 收集本回合的硬指令（按优先级 H5 → H2 → H3 → H10 → H4 → H8 → H9，每个槽位最多一条）。
  * force-switch 阶段（无 request.active）没有可覆盖的招式选择，直接返回空。
  */
 export function collectTurnDirectives(input: {
@@ -312,6 +363,33 @@ export function collectTurnDirectives(input: {
           slot: plan.slot,
           key,
           note: `hard:hypnosis: ${speciesOf(me)} puts the fastest awake foe ${target.foe.species} to sleep`,
+        });
+        busy.add(plan.slot);
+        continue;
+      }
+    }
+    // H10：本次上场后的首个行动回合 + 存在无法反制的目标 → 强制 Fake Out（控制技必须用满窗口，避免空过）
+    const hasFakeOut = reqActive.moves.some(move => toId(move.id) === 'fakeout');
+    if (hasFakeOut && tracked?.switchInTurn !== undefined && state.turn - tracked.switchInTurn <= 1) {
+      const scrappy = toId(me.ability ?? me.baseAbility ?? '') === 'scrappy';
+      // Dazzling/Queenly Majesty/Armor Tail 保护对手整侧的宝可梦免受先制招式，任一在场揭示即全部不可命中
+      const priorityBlocked = foes.some(foe => ['dazzling', 'queenlymajesty', 'armortail'].includes(toId(foe.ability ?? '')));
+      const terrain = psychicTerrainActive(state.fieldConditions);
+      const hittable = foes
+        .map((foe, index) => ({foe, index, spe: dex.species[toId(foe.species)]?.baseStats?.spe}))
+        .filter(entry =>
+          (scrappy || !entry.foe.types.some(type => toId(type) === 'ghost'))
+          && toId(entry.foe.ability ?? '') !== 'innerfocus'
+          && toId(entry.foe.item ?? '') !== 'covertcloak'
+          && (!terrain || isAirborne(entry.foe)))
+        .sort((a, b) => (b.spe ?? -1) - (a.spe ?? -1) || a.index - b.index);
+      const target = priorityBlocked ? undefined : hittable[0];
+      const key = target ? optionKeyFor('fakeout', target.index) : null;
+      if (target && key) {
+        directives.push({
+          slot: plan.slot,
+          key,
+          note: `hard:fakeout-priority: ${speciesOf(me)} lands Fake Out on ${target.foe.species} to deny its action`,
         });
         busy.add(plan.slot);
         continue;

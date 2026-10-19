@@ -571,6 +571,8 @@ describe('describeSwitchOption', () => {
     expect(yawn).toContain('switching this slot out removes Yawn from Golisopod before it falls asleep');
     const low = describeSwitchOption({...base, outgoing: {species: 'Golisopod', hpPercent: 20}});
     expect(low).toContain('Golisopod is at 20% HP: switching preserves it');
+    expect(low).toContain('but if its remaining value is low, letting it faint can be the better trade');
+    expect(low).toContain('costs no action and brings your replacement in for free');
     const drops = describeSwitchOption({...base, outgoing: {species: 'Golisopod', boosts: {atk: -1, spe: 1}}});
     expect(drops).toContain("switching out clears Golisopod's lowered stats (atk -1)");
     expect(drops).not.toContain('spe');
@@ -1491,6 +1493,60 @@ describe('保护类招式的致死威胁注解', () => {
     });
     expect(label).toContain('do not use Protect now');
     expect(label).not.toMatch(/consider Protecting/);
+  });
+});
+
+describe('非保护类招式的致死威胁注解', () => {
+  it('攻击选项在致死威胁下给出保护/换人引导', () => {
+    const label = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(label).toContain('warning: a lethal hit is likely');
+    expect(label).toContain('foe Charizard has revealed Brave Bird (≈63% on this Pokemon)');
+    expect(label).toContain('consider Protecting this turn instead');
+    expect(label).toContain('acting now risks being knocked out before this move resolves');
+  });
+
+  it('讲究道具持有者的攻击选项引导换下而不引导守住', () => {
+    const label = describeMoveOption({
+      dex, moveId: 'hydropump', moveName: 'Hydro Pump', pp: 5, maxpp: 5,
+      attackerTypes: ['Water'], attackerStats: {spa: 150}, attackerItem: 'Choice Scarf', attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: false, priorPercent: 45.2}],
+    });
+    expect(label).toContain('foe Charizard commonly runs Brave Bird (45.2% prior; ≈63% on this Pokemon)');
+    expect(label).toContain('consider switching this Pokemon out instead');
+    expect(label).not.toMatch(/consider Protecting/);
+  });
+  it('致死威胁下补充卖头权衡：被击倒不消耗行动、替补免费入场', () => {
+    const attack = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(attack).toContain('taking the hit is a valid trade');
+    expect(attack).toContain('costs no action and brings your replacement in for free');
+    const choice = describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180}, attackerItem: 'Choice Scarf', attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(choice).toContain('letting it be knocked out beats a manual switch too');
+    expect(choice).toContain('costs no action and brings your replacement in for free');
+  });
+
+  it('无致死威胁不输出；保护类招式不重复输出', () => {
+    expect(describeMoveOption({
+      dex, moveId: 'ironhead', moveName: 'Iron Head', pp: 15, maxpp: 15,
+      attackerTypes: ['Bug', 'Steel'], attackerStats: {atk: 180},
+    })).not.toMatch(/lethal hit is likely/);
+    const protect = describeMoveOption({
+      dex, moveId: 'protect', moveName: 'Protect', pp: 10, maxpp: 10, attackerTypes: ['Ghost', 'Fire'],
+      attackerHpPercent: 22,
+      lethalThreats: [{foeSpecies: 'Charizard', move: 'Brave Bird', percent: 63, revealed: true}],
+    });
+    expect(protect.match(/lethal hit is likely/g)).toHaveLength(1);
   });
 });
 

@@ -1,6 +1,6 @@
 import {beforeEach, describe, expect, it} from 'vitest';
 import type {DexData} from '../src/dex/index.js';
-import {applyPreviewDirectives, collectTurnDirectives, enforceTyranitarMega, resetHardDirectives} from '../src/decide/hard-directives.js';
+import {applyPreviewDirectives, collectTurnDirectives, enforceMegaInclusion, enforceTyranitarMega, resetHardDirectives} from '../src/decide/hard-directives.js';
 import {buildTurnPlans, type SlotOption, type SlotQuestionPlan} from '../src/decide/turn.js';
 import type {BattleRequest} from '../src/state/request.js';
 import {mkDex, mkRequest, mkTrackerWithLines} from './helpers.js';
@@ -901,5 +901,287 @@ describe('硬指令 H9：雨天换班基拉斯覆盖', () => {
     const plans = buildTurnPlans({dex, request, tracker});
     const directives = collectTurnDirectives({dex, request, tracker, plans});
     expect(directives.map(d => [d.slot, d.key])).toEqual([[1, 'switch_3'], [2, 'switch_4']]);
+  });
+});
+
+// ---------- H10 ----------
+
+/** H10 用 dex：补充 Inner Focus / Armor Tail / 幽灵物种与 Close Combat 招式表 */
+function mkFakeOutDex(): DexData {
+  const dex = mkDirectiveDex();
+  dex.species.farigiraf = {name: 'Farigiraf', types: ['Normal', 'Psychic'], baseStats: {hp: 120, atk: 90, def: 70, spa: 110, spd: 70, spe: 60}, abilities: {0: 'Armor Tail'}};
+  dex.species.lucario = {name: 'Lucario', types: ['Fighting', 'Steel'], baseStats: {hp: 70, atk: 110, def: 70, spa: 115, spd: 70, spe: 90}, abilities: {0: 'Inner Focus'}};
+  dex.species.banette = {name: 'Banette', types: ['Ghost'], baseStats: {hp: 64, atk: 115, def: 65, spa: 83, spd: 63, spe: 65}, abilities: {0: 'Insomnia'}};
+  dex.moves.closecombat = {name: 'Close Combat', type: 'Fighting', basePower: 120, category: 'Physical', target: 'normal', priority: 0};
+  return dex;
+}
+
+/** Sneasler（Fake Out 为 move_3）+ Milotic 在场；替补 Indeedee/Tyranitar 供其他硬指令兜底判定 */
+function mkFakeOutRequest(): BattleRequest {
+  return {
+    active: [
+      {moves: [
+        {move: 'Close Combat', id: 'closecombat', pp: 5, maxpp: 5, target: 'normal'},
+        {move: 'Dire Claw', id: 'direclaw', pp: 15, maxpp: 15, target: 'normal'},
+        {move: 'Fake Out', id: 'fakeout', pp: 10, maxpp: 10, target: 'normal'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      ]},
+      {moves: [
+        {move: 'Muddy Water', id: 'muddywater', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+        {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+      ]},
+    ],
+    side: {
+      name: 'JevBot1234',
+      id: 'p1',
+      pokemon: [
+        {ident: 'p1: Sneasler', details: 'Sneasler, L50, F', condition: '160/160', active: true, stats: {atk: 130, def: 60, spa: 40, spd: 80, spe: 120}, ability: 'unburden', moves: ['closecombat', 'direclaw', 'fakeout', 'protect']},
+        {ident: 'p1: Milotic', details: 'Milotic, L50, F', condition: '175/175', active: true, stats: MILOTIC_STATS, ability: 'marvelscale', moves: ['muddywater', 'protect']},
+        {ident: 'p1: Indeedee', details: 'Indeedee, L50, M', condition: '145/145', active: false, item: 'choicescarf', ability: 'psychicsurge', moves: ['expandingforce', 'trick']},
+        {ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: false, item: 'tyranitarite', ability: 'sandstream', moves: ['rockslide', 'knockoff']},
+      ],
+    },
+    rqid: 31,
+  };
+}
+
+/** H10 场景协议：p1a Sneasler + p1b Milotic 首发，对手为给定两只；extraLines 插在 turn 之前 */
+function mkFakeOutFoes(p2a: string, p2b: string, extraLines: string[] = []): string[] {
+  return [
+    '|poke|p1|Sneasler, L50, F|',
+    '|poke|p1|Milotic, L50, F|',
+    '|poke|p1|Indeedee, L50, M|',
+    '|poke|p1|Tyranitar, L50, M|',
+    `|poke|p2|${p2a}, L50, M|`,
+    `|poke|p2|${p2b}, L50, F|`,
+    '|teampreview|4',
+    '|teamsize|p1|4',
+    '|teamsize|p2|4',
+    '|start',
+    '|switch|p1a: Sneasler|Sneasler, L50, F|160/160',
+    '|switch|p1b: Milotic|Milotic, L50, F|175/175',
+    `|switch|p2a: ${p2a}|${p2a}, L50, M|150/150`,
+    `|switch|p2b: ${p2b}|${p2b}, L50, F|160/160`,
+    ...extraLines,
+    '|turn|1',
+  ];
+}
+
+describe('硬指令 H10：抢占 Fake Out 首个行动窗口', () => {
+  it('首发首回合对最快的可命中对手强制 Fake Out', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Kingambit', 'Charizard'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.slot).toBe(1);
+    expect(fo?.key).toBe('move_3_foe_b');
+    expect(fo?.note).toContain('Sneasler');
+    expect(fo?.note).toContain('Charizard');
+  });
+
+  it('幽灵目标被跳过，改打另一只可命中对手', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Sableye', 'Amoonguss'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.key).toBe('move_3_foe_b');
+    expect(fo?.note).toContain('Amoonguss');
+  });
+
+  it('两只幽灵均不可命中时不触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Sableye', 'Banette'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('我方为 Scrappy 时幽灵目标可命中', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    request.side.pokemon[0] = {...request.side.pokemon[0], ability: 'scrappy'};
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Sableye', 'Banette'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.key).toBe('move_3_foe_b');
+  });
+
+  it('Inner Focus 目标被跳过，改打较慢的另一只', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Lucario', 'Kingambit', ['|-ability|p2a: Lucario|Inner Focus']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.key).toBe('move_3_foe_b');
+    expect(fo?.note).toContain('Kingambit');
+  });
+
+  it('Covert Cloak 目标被跳过，改打较慢的另一只', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Charizard', 'Kingambit', ['|-item|p2a: Charizard|Covert Cloak']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.key).toBe('move_3_foe_b');
+    expect(fo?.note).toContain('Kingambit');
+  });
+
+  it('对手在场揭示优先阻断特性（Armor Tail）时不触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Farigiraf', 'Charizard', ['|-ability|p2a: Farigiraf|Armor Tail']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('精神场地激活时只对浮空目标使用', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Kingambit', 'Charizard', ['|-fieldstart|move: Psychic Terrain|[from]ability: Psychic Surge']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.key).toBe('move_3_foe_b');
+    expect(fo?.note).toContain('Charizard');
+  });
+
+  it('精神场地激活且对手全为地面目标时不触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Kingambit', 'Incineroar', ['|-fieldstart|move: Psychic Terrain|[from]ability: Psychic Surge']));
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('窗口过期（非首次行动回合）时不触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    const lines = mkFakeOutFoes('Kingambit', 'Charizard');
+    lines.push('|turn|2');
+    const tracker = mkTrackerWithLines(lines);
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+
+  it('中途换入后的首个行动回合同样触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    // 换入场景：场上同伴为 Salamence（不带 Tailwind，避免 H5 干扰）
+    request.side.pokemon[1] = {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: true, stats: SALAMENCE_STATS, ability: 'intimidate', moves: ['hypervoice', 'protect']};
+    request.active![1].moves = [
+      {move: 'Hyper Voice', id: 'hypervoice', pp: 10, maxpp: 10, target: 'allAdjacentFoes'},
+      {move: 'Protect', id: 'protect', pp: 10, maxpp: 10, target: 'self'},
+    ];
+    const tracker = mkTrackerWithLines([
+      '|poke|p1|Sneasler, L50, F|',
+      '|poke|p1|Salamence, L50, M|',
+      '|poke|p1|Indeedee, L50, M|',
+      '|poke|p1|Milotic, L50, F|',
+      '|poke|p2|Kingambit, L50, M|',
+      '|poke|p2|Charizard, L50, F|',
+      '|teampreview|4',
+      '|teamsize|p1|4',
+      '|teamsize|p2|4',
+      '|start',
+      '|switch|p1a: Milotic|Milotic, L50, F|175/175',
+      '|switch|p1b: Salamence|Salamence, L50, M|170/170',
+      '|switch|p2a: Kingambit|Kingambit, L50, M|150/150',
+      '|switch|p2b: Charizard|Charizard, L50, F|160/160',
+      '|turn|1',
+      '|switch|p1a: Sneasler|Sneasler, L50, F|160/160',
+      '|turn|2',
+    ]);
+    const plans = buildTurnPlans({dex, request, tracker});
+    const directives = collectTurnDirectives({dex, request, tracker, plans});
+    const fo = directives.find(d => d.note.includes('hard:fakeout-priority'));
+    expect(fo?.slot).toBe(1);
+    expect(fo?.key).toBe('move_3_foe_b');
+  });
+
+  it('Fake Out 不在服务器选项中（未携带/不可用）时不触发', () => {
+    const dex = mkFakeOutDex();
+    const request = mkFakeOutRequest();
+    request.active![0].moves = request.active![0].moves.filter(move => move.id !== 'fakeout');
+    const tracker = mkTrackerWithLines(mkFakeOutFoes('Kingambit', 'Charizard'));
+    const plans = buildTurnPlans({dex, request, tracker});
+    expect(collectTurnDirectives({dex, request, tracker, plans})).toEqual([]);
+  });
+});
+
+describe('硬指令 H11：零 Mega 兜底', () => {
+  /** 预览请求：6 只依次排列，item 决定 Mega 可进化性 */
+  function mkMegaPreviewRequest(entries: Array<{name: string; item?: string}>): BattleRequest {
+    return {
+      teamPreview: true,
+      side: {
+        name: 'JevBot1234',
+        id: 'p1',
+        pokemon: entries.map(({name, item}) => ({
+          ident: `p1: ${name}`, details: `${name}, L50, M`, condition: '100/100', active: false,
+          ...(item ? {item} : {}),
+        })),
+      },
+      rqid: 5,
+    };
+  }
+
+  const MEGA_TEAM = [
+    {name: 'Indeedee'}, {name: 'Milotic'},
+    {name: 'Salamence', item: 'salamencite'}, {name: 'Golisopod'},
+    {name: 'Tyranitar', item: 'tyranitarite'}, {name: 'Chandelure'},
+  ];
+
+  it('四题全部绕开 Mega 时按偏好分补入替补位、首发不动', () => {
+    const dex = mkDirectiveDex();
+    const request = mkMegaPreviewRequest(MEGA_TEAM);
+    const result = enforceMegaInclusion({
+      dex, request, order: [1, 2, 6, 4],
+      slotScores: {6: 0.5, 4: 0.5, 3: 0.2, 5: 0.3},
+    });
+    // 补偏好分更高的 Tyranitar（0.3 > Salamence 0.2）；替补同分时淘汰更靠后的 slot 4
+    expect(result.order).toEqual([1, 2, 6, 5]);
+    expect(result.notes).toEqual(['hard:mega-required: slot 5 (Tyranitar) replaces slot 4 (Golisopod) - the four must include one Mega-capable Pokemon']);
+  });
+
+  it('前四位已含 Mega 时不调整（设计内单带即可，多带不干预）', () => {
+    const dex = mkDirectiveDex();
+    const request = mkMegaPreviewRequest(MEGA_TEAM);
+    const result = enforceMegaInclusion({dex, request, order: [1, 3, 2, 6]});
+    expect(result.order).toEqual([1, 3, 2, 6]);
+    expect(result.notes).toEqual([]);
+  });
+
+  it('无偏好分时按队伍顺序补入靠前的 Mega、淘汰第二替补', () => {
+    const dex = mkDirectiveDex();
+    const request = mkMegaPreviewRequest(MEGA_TEAM);
+    const result = enforceMegaInclusion({dex, request, order: [1, 2, 6, 4]});
+    expect(result.order).toEqual([1, 2, 6, 3]);
+    expect(result.notes.some(n => n.startsWith('hard:mega-required'))).toBe(true);
+  });
+
+  it('六位 order（fallback 场景）补入时与目标位交换而不是覆盖，避免丢槽位', () => {
+    const dex = mkDirectiveDex();
+    const request = mkMegaPreviewRequest([
+      {name: 'Indeedee'}, {name: 'Milotic'}, {name: 'Golisopod'}, {name: 'Chandelure'},
+      {name: 'Salamence', item: 'salamencite'}, {name: 'Tyranitar', item: 'tyranitarite'},
+    ]);
+    const result = enforceMegaInclusion({dex, request, order: [1, 2, 3, 4, 5, 6]});
+    // 前四位无 Mega → slot 5 与第二替补位（order[3]=slot 4）交换，六位顺序不丢槽
+    expect(result.order).toEqual([1, 2, 3, 5, 4, 6]);
+  });
+
+  it('队伍没有 Mega 可进化者时不触发', () => {
+    const dex = mkDirectiveDex();
+    const request = mkMegaPreviewRequest(MEGA_TEAM.map(({name}) => ({name})));
+    const result = enforceMegaInclusion({dex, request, order: [1, 2, 6, 4]});
+    expect(result.order).toEqual([1, 2, 6, 4]);
+    expect(result.notes).toEqual([]);
   });
 });

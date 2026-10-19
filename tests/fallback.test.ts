@@ -7,8 +7,25 @@ import {mkDex, mkRequest, mkTracker} from './helpers.js';
 const dex = mkDex();
 
 describe('fallbackTeamPreview', () => {
-  it('按队伍顺序 1-6', () => {
-    expect(fallbackTeamPreview()).toEqual({kind: 'team', order: [1, 2, 3, 4, 5, 6]});
+  it('按队伍顺序 1-6（H1/H6/H11 无触发条件时）', () => {
+    const request = mkRequest({teamPreview: true});
+    request.active = undefined;
+    expect(fallbackTeamPreview({dex, request, tracker: mkTracker()})).toEqual({kind: 'team', order: [1, 2, 3, 4, 5, 6]});
+  });
+
+  it('零 Mega 的四只时补入 Mega 手（与 jev 路径同一条硬指令链）', () => {
+    const request = mkRequest({teamPreview: true});
+    request.active = undefined;
+    request.side.pokemon = [
+      {ident: 'p1: Golisopod', details: 'Golisopod, L50, M', condition: '150/150', active: false},
+      {ident: 'p1: Chandelure', details: 'Chandelure, L50, F', condition: '135/135', active: false},
+      {ident: 'p1: Excadrill', details: 'Excadrill, L50, F', condition: '100/100', active: false},
+      {ident: 'p1: Rotom-Wash', details: 'Rotom-Wash, L50', condition: '100/100', active: false},
+      {ident: 'p1: Salamence', details: 'Salamence, L50, M', condition: '170/170', active: false, item: 'salamencite'},
+      {ident: 'p1: Tyranitar', details: 'Tyranitar, L50, M', condition: '175/175', active: false, item: 'tyranitarite'},
+    ];
+    // 基础顺序 [1..6]，slot 5 与 order[3]（slot 4）交换 → 前四含 Mega
+    expect(fallbackTeamPreview({dex, request, tracker: mkTracker()})).toEqual({kind: 'team', order: [1, 2, 3, 5, 4, 6]});
   });
 });
 
